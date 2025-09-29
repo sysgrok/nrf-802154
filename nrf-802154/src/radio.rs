@@ -8,7 +8,7 @@ use embassy_sync::signal::Signal;
 
 use crate::raw;
 
-/// Maximum PSDU size, in bytes, excluding the PHY header (PHR) and the CRC
+/// Maximum PSDU size, in bytes, excluding the PHY header (PHR) and the CRC/FCS
 pub const MAX_PSDU_SIZE: usize = MAX_PACKET_SIZE - 2/*CRC*/ - 1/*PHR*/;
 
 const MAX_PACKET_SIZE: usize = 128;
@@ -45,12 +45,14 @@ pub enum Cca {
     },
 }
 
-/// Details of a received transmit frame
+/// Details of a received frame
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct PsduMeta {
     /// Length of the received PSDU (PHY service data unit) in bytes, excluding the PHY header (PHR) and the CRC
     pub len: u8,
+    /// CRC of the received frame
+    pub crc: u16,
     /// Received signal power in dBm
     pub power: i8,
     /// Link Quality Indicator of the received ACK frame
@@ -122,8 +124,8 @@ impl<'d, T: Instance> Radio<'d, T> {
     /// Receive one radio packet
     ///
     /// # Arguments
-    /// - `buf`: A buffer where the received PSDU data will be copied to. The buffer must be at
-    ///   least `MAX_PSDU_SIZE` bytes long.
+    /// - `buf`: A buffer where the received PSDU data will be copied to (excluding PHY fields like PHR and CRC/FCS).
+    ///   The buffer must be at least `MAX_PSDU_SIZE` bytes long.
     ///
     /// # Returns
     /// - `Ok(PsduMeta)` if a packet was successfully received
@@ -137,8 +139,8 @@ impl<'d, T: Instance> Radio<'d, T> {
         }
 
         let status = RadioState::wait(|state| {
-            if matches!(state.status, RadioStatus::ReceiveDone { .. }) {
-                buf.copy_from_slice(&state.rx);
+            if let RadioStatus::ReceiveDone(psdu_meta) = state.status {
+                buf.copy_from_slice(&state.rx[1..][..psdu_meta.len as _]);
             }
 
             matches!(
@@ -159,7 +161,8 @@ impl<'d, T: Instance> Radio<'d, T> {
     /// Transmit one radio packet
     ///
     /// # Arguments
-    /// - `data`: The PSDU data to transmit, excluding the PHY header (PHR) and the CRC.
+    /// - `data`: The PSDU data to transmit; this data should not contain PHY fields like PHR and CRC/FCS.
+    ///   The data must be at most `MAX_PSDU_SIZE` bytes long.
     /// - `cca`: If `true`, perform Clear Channel Assessment (CCA) before transmission.
     /// - `ack_buf`: If the radio is configured to wait for ACK frame in response to its transmission,
     ///   this buffer will be filled with the PSDU data of the received ACK frame.
@@ -178,11 +181,23 @@ impl<'d, T: Instance> Radio<'d, T> {
         cca: bool,
         mut ack_buf: Option<&mut [u8]>,
     ) -> Result<Option<PsduMeta>, Error> {
+        if data.len() > MAX_PSDU_SIZE {
+            return Err(Error::TransmitDataTooLarge);
+        }
+
+        if let Some(ack_buf) = ack_buf.as_ref() {
+            if ack_buf.len() < MAX_PSDU_SIZE {
+                return Err(Error::ReceiveBufTooSmall);
+            }
+        }
+
         // TODO: Potential race condition if the radio is scheduled to transmit but not transmitting yet
         let packet_data = RadioState::wait(|state| {
             if !matches!(state.status, RadioStatus::Transmitting) {
-                state.tx[0] = data.len() as u8 + 2; // + CRC
+                state.tx[0] = data.len() as u8 + 1 + 2; // + PHR + CRC
                 state.tx[1..][..data.len()].copy_from_slice(data);
+                state.tx[1 + data.len()] = 0; // CRC placeholder
+                state.tx[1 + data.len() + 1] = 0; // CRC placeholder
 
                 let packet_data: &mut [u8] = &mut state.tx;
 
@@ -235,8 +250,8 @@ impl<'d, T: Instance> Radio<'d, T> {
         })
         .await;
 
-        if let RadioStatus::TransmitDone(rx_pdu_details) = status {
-            Ok(rx_pdu_details)
+        if let RadioStatus::TransmitDone(psdu_meta) = status {
+            Ok(psdu_meta)
         } else {
             Err(Error::Transmit)
         }
@@ -361,7 +376,8 @@ unsafe extern "C" fn nrf_802154_received_raw(p_data: *mut u8, power: i8, len: u8
             .copy_from_slice(core::slice::from_raw_parts(p_data, len as usize));
 
         state.status = RadioStatus::ReceiveDone(PsduMeta {
-            len,
+            len: len - 1 - 2, // - PHR - CRC
+            crc: u16::from_le_bytes([state.rx[len as usize - 2], state.rx[len as usize - 1]]),
             power,
             lqi: None,
             time: None,
@@ -381,7 +397,8 @@ unsafe extern "C" fn nrf_802154_received_timestamp_raw(p_data: *mut u8, power: i
             .copy_from_slice(core::slice::from_raw_parts(p_data, len as usize));
 
         state.status = RadioStatus::ReceiveDone(PsduMeta {
-            len,
+            len: len - 1 - 2, // - PHR - CRC
+            crc: u16::from_le_bytes([state.rx[len as usize - 2], state.rx[len as usize - 1]]),
             power,
             lqi: None,
             time: Some(time),
@@ -410,10 +427,11 @@ unsafe extern "C" fn nrf_802154_transmitted_raw(
 
             let packet = unsafe { core::slice::from_raw_parts(p_metadata.data.transmitted.p_ack, len as usize) };
 
-            state.rx.copy_from_slice(&packet[1..][..len as _]);
+            state.rx.copy_from_slice(packet);
 
             state.status = RadioStatus::TransmitDone(Some(PsduMeta {
-                len,
+                len: len - 1 - 2, // - PHR - CRC
+                crc: u16::from_le_bytes([state.rx[len as usize - 2], state.rx[len as usize - 1]]),
                 power: p_metadata.data.transmitted.power,
                 lqi: Some(p_metadata.data.transmitted.lqi),
                 time: Some(p_metadata.data.transmitted.time),
