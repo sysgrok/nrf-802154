@@ -1,7 +1,7 @@
-[![crates.io](https://img.shields.io/crates/v/nrf-sdc.svg)](https://crates.io/crates/nrf-sdc)
-[![docs.rs](https://docs.rs/nrf-sdc/badge.svg)](https://docs.rs/nrf-sdc)
+[![crates.io](https://img.shields.io/crates/v/nrf-802154.svg)](https://crates.io/crates/nrf-802154)
+[![docs.rs](https://docs.rs/nrf-sdc/badge.svg)](https://docs.rs/nrf-802154)
 
-# nRF 802.15.4. Radio Driver
+# nRF 802.15.4 Radio Driver
 
 Rust bindings for the Nordic Semiconductor nRF series 802.15.4 C radio driver
 
