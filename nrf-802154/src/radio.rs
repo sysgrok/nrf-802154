@@ -8,12 +8,19 @@ use embassy_sync::signal::Signal;
 
 use crate::raw;
 
+/// Maximum PSDU size, in bytes, excluding the PHY header (PHR) and the CRC
+pub const MAX_PSDU_SIZE: usize = MAX_PACKET_SIZE - 2/*CRC*/ - 1/*PHR*/;
+
+const MAX_PACKET_SIZE: usize = 128;
+
 /// Radio error
 // TODO: Extend the error codes with additional information
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
 pub enum Error {
+    TransmitDataTooLarge,
+    ReceiveBufTooSmall,
     ScheduleTransmit,
     EnterReceive,
     Transmit,
@@ -38,132 +45,18 @@ pub enum Cca {
     },
 }
 
-/// An IEEE 802.15.4 packet
-///
-/// This `Packet` is a PHY layer packet. It's made up of the physical header (PHR) and the PSDU
-/// (PHY service data unit). The PSDU of this `Packet` will always include the MAC level CRC, AKA
-/// the FCS (Frame Control Sequence) -- the CRC is fully computed in hardware and automatically
-/// appended on transmission and verified on reception.
-///
-/// The API lets users modify the usable part (not the CRC) of the PSDU via the `deref` and
-/// `copy_from_slice` methods. These methods will automatically update the PHR.
-///
-/// See figure 119 in the Product Specification of the nRF52840 for more details
-#[derive(Debug)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct Packet {
-    buffer: [u8; Self::SIZE],
-}
-
-// See figure 124 in nRF52840-PS
-impl Packet {
-    // For indexing purposes
-    const PHY_HDR: usize = 0;
-    const DATA: core::ops::RangeFrom<usize> = 1..;
-
-    /// Maximum amount of usable payload (CRC excluded) a single packet can contain, in bytes
-    pub const CAPACITY: u8 = 125;
-
-    const CRC: u8 = 2; // Size of the CRC, which is *never* copied to / from RAM
-    const MAX_PSDU_LEN: u8 = Self::CAPACITY + Self::CRC;
-    const SIZE: usize = 1 /* PHR */ + Self::MAX_PSDU_LEN as usize;
-
-    /// Create an empty packet (length = 0)
-    pub const fn new() -> Self {
-        let mut packet = Self {
-            buffer: [0; Self::SIZE],
-        };
-        packet.buffer[Self::PHY_HDR] = Self::CRC;
-        packet
-    }
-
-    /// Fill the packet payload with given `src` data
-    ///
-    /// # Panics
-    ///
-    /// This function panics if `src` is larger than `Self::CAPACITY`
-    pub fn copy_from_slice(&mut self, src: &[u8]) {
-        assert!(src.len() <= Self::CAPACITY as usize);
-        let len = src.len() as u8;
-        self.buffer[Self::DATA][..len as usize].copy_from_slice(&src[..len.into()]);
-        self.set_len(len);
-    }
-
-    /// Return the size of this packet's payload
-    pub const fn len(&self) -> u8 {
-        self.buffer[Self::PHY_HDR] - Self::CRC
-    }
-
-    /// Return `true` if this packet's payload is empty
-    pub const fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Change the size of the packet's payload
-    ///
-    /// # Panics
-    ///
-    /// This function panics if `len` is larger than `Self::CAPACITY`
-    pub fn set_len(&mut self, len: u8) {
-        assert!(len <= Self::CAPACITY);
-        self.buffer[Self::PHY_HDR] = len + Self::CRC;
-    }
-
-    /// Return the LQI (Link Quality Indicator) of the received packet
-    ///
-    /// Note that the LQI is stored in the `Packet`'s internal buffer by the hardware so the value
-    /// returned by this method is only valid after a `Radio.recv` operation. Operations that
-    /// modify the `Packet`, like `copy_from_slice` or `set_len`+`deref_mut`, will overwrite the
-    /// stored LQI value.
-    ///
-    /// Also note that the hardware will *not* compute a LQI for packets smaller than 3 bytes so
-    /// this method will return an invalid value for those packets.
-    pub const fn lqi(&self) -> u8 {
-        self.buffer[1 /* PHY_HDR */ + self.len() as usize /* data */]
-    }
-}
-
-impl Default for Packet {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl core::ops::Deref for Packet {
-    type Target = [u8];
-
-    fn deref(&self) -> &[u8] {
-        &self.buffer[Self::DATA][..self.len() as usize]
-    }
-}
-
-impl core::ops::DerefMut for Packet {
-    fn deref_mut(&mut self) -> &mut [u8] {
-        let len = self.len();
-        &mut self.buffer[Self::DATA][..len as usize]
-    }
-}
-
-/// Details of the received frame
+/// Details of a received transmit frame
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct RxFrameDetails {
-    /// Received signal power in dBm
-    pub power: i8,
-    /// Timestamp taken when the last symbol of the frame was received
-    pub time: Option<u64>,
-}
-
-/// Details of the received transmit ACK frame
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct TxAckFrameDetails {
+pub struct PsduMeta {
+    /// Length of the received PSDU (PHY service data unit) in bytes, excluding the PHY header (PHR) and the CRC
+    pub len: u8,
     /// Received signal power in dBm
     pub power: i8,
     /// Link Quality Indicator of the received ACK frame
-    pub lqi: u8,
+    pub lqi: Option<u8>,
     /// Timestamp taken when the last symbol of the frame was received
-    pub time: u64,
+    pub time: Option<u64>,
 }
 
 /// IEEE 802.15.4 radio driver.
@@ -229,14 +122,14 @@ impl<'d, T: Instance> Radio<'d, T> {
     /// Receive one radio packet
     ///
     /// # Arguments
-    /// - `packet`: A buffer where the received packet will be copied to. The buffer must be at
-    ///   least `Packet::CAPACITY` bytes long.
+    /// - `buf`: A buffer where the received PSDU data will be copied to. The buffer must be at
+    ///   least `MAX_PSDU_SIZE` bytes long.
     ///
     /// # Returns
-    /// - `Ok(RxFrameDetails)` if a packet was successfully received
+    /// - `Ok(PsduMeta)` if a packet was successfully received
     /// - `Err(Error::EnterReceive)` if the radio could not enter receive mode
     /// - `Err(Error::Receive)` if the reception failed (CRC error, aborted, etc)
-    pub async fn receive(&mut self, packet: &mut Packet) -> Result<RxFrameDetails, Error> {
+    pub async fn receive(&mut self, buf: &mut [u8]) -> Result<PsduMeta, Error> {
         let receive_entered = unsafe { raw::nrf_802154_receive() };
 
         if !receive_entered {
@@ -245,7 +138,7 @@ impl<'d, T: Instance> Radio<'d, T> {
 
         let status = RadioState::wait(|state| {
             if matches!(state.status, RadioStatus::ReceiveDone { .. }) {
-                packet.copy_from_slice(&state.rx);
+                buf.copy_from_slice(&state.rx);
             }
 
             matches!(
@@ -266,14 +159,14 @@ impl<'d, T: Instance> Radio<'d, T> {
     /// Transmit one radio packet
     ///
     /// # Arguments
-    /// - `packet`: The packet to transmit.
+    /// - `data`: The PSDU data to transmit, excluding the PHY header (PHR) and the CRC.
     /// - `cca`: If `true`, perform Clear Channel Assessment (CCA) before transmission.
-    /// - `ack_packet`: If the radio is configured to wait for ACK frame in response to its transmission,
-    ///   this buffer will be filled with the received ACK frame.
+    /// - `ack_buf`: If the radio is configured to wait for ACK frame in response to its transmission,
+    ///   this buffer will be filled with the PSDU data of the received ACK frame.
     ///   In either case, `None` can be passed if the user is not interested in the ACK frame.
     ///
     /// # Returns
-    /// - `Ok(Some(TxAckFrameDetails))` if the packet was successfully transmitted and the radio is configured
+    /// - `Ok(Some(PsduMeta))` if the packet was successfully transmitted and the radio is configured
     ///   to wait for an ACK frame, which was received.
     /// - `Ok(None)` if the packet was successfully transmitted and the radio is not configured
     ///   to wait for an ACK frame.
@@ -281,14 +174,15 @@ impl<'d, T: Instance> Radio<'d, T> {
     /// - `Err(Error::Transmit)` if the transmission failed (no ACK received, etc)
     pub async fn transmit(
         &mut self,
-        packet: &Packet,
+        data: &[u8],
         cca: bool,
-        mut ack_packet: Option<&mut Packet>,
-    ) -> Result<Option<TxAckFrameDetails>, Error> {
+        mut ack_buf: Option<&mut [u8]>,
+    ) -> Result<Option<PsduMeta>, Error> {
         // TODO: Potential race condition if the radio is scheduled to transmit but not transmitting yet
         let packet_data = RadioState::wait(|state| {
             if !matches!(state.status, RadioStatus::Transmitting) {
-                state.tx.copy_from_slice(packet);
+                state.tx[0] = data.len() as u8 + 2; // + CRC
+                state.tx[1..][..data.len()].copy_from_slice(data);
 
                 let packet_data: &mut [u8] = &mut state.tx;
 
@@ -326,8 +220,10 @@ impl<'d, T: Instance> Radio<'d, T> {
 
         let status = RadioState::wait(|state| {
             if matches!(state.status, RadioStatus::TransmitDone(_)) {
-                if let Some(ack_packet) = ack_packet.as_mut() {
-                    ack_packet.copy_from_slice(&state.tx_ack);
+                if let Some(ack_buf) = ack_buf.as_mut() {
+                    if let RadioStatus::TransmitDone(Some(meta)) = state.status {
+                        ack_buf.copy_from_slice(&state.rx[1..][..meta.len as _]);
+                    }
                 }
             }
 
@@ -371,7 +267,7 @@ where
 enum RadioStatus {
     Idle,
     ReceiveFailed(raw::nrf_802154_tx_error_t),
-    ReceiveDone(RxFrameDetails),
+    ReceiveDone(PsduMeta),
     CcaFailed(raw::nrf_802154_cca_error_t),
     CcaDone(bool),
     EnergyDetectionDetected(i8),
@@ -379,25 +275,23 @@ enum RadioStatus {
     Transmitting,
     TxAckStarted,
     TransmitFailed(raw::nrf_802154_tx_error_t),
-    TransmitDone(Option<TxAckFrameDetails>),
+    TransmitDone(Option<PsduMeta>),
 }
 
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 struct RadioState {
     status: RadioStatus,
-    tx: Packet,
-    tx_ack: Packet,
-    rx: Packet,
+    tx: [u8; MAX_PACKET_SIZE],
+    rx: [u8; MAX_PACKET_SIZE],
 }
 
 impl RadioState {
     const fn new() -> Self {
         Self {
             status: RadioStatus::Idle,
-            tx: Packet::new(),
-            tx_ack: Packet::new(),
-            rx: Packet::new(),
+            tx: [0; MAX_PACKET_SIZE],
+            rx: [0; MAX_PACKET_SIZE],
         }
     }
 
@@ -466,7 +360,12 @@ unsafe extern "C" fn nrf_802154_received_raw(p_data: *mut u8, power: i8, len: u8
             .rx
             .copy_from_slice(core::slice::from_raw_parts(p_data, len as usize));
 
-        state.status = RadioStatus::ReceiveDone(RxFrameDetails { power, time: None });
+        state.status = RadioStatus::ReceiveDone(PsduMeta {
+            len,
+            power,
+            lqi: None,
+            time: None,
+        });
 
         unsafe {
             raw::nrf_802154_buffer_free_raw(p_data);
@@ -481,8 +380,10 @@ unsafe extern "C" fn nrf_802154_received_timestamp_raw(p_data: *mut u8, power: i
             .rx
             .copy_from_slice(core::slice::from_raw_parts(p_data, len as usize));
 
-        state.status = RadioStatus::ReceiveDone(RxFrameDetails {
+        state.status = RadioStatus::ReceiveDone(PsduMeta {
+            len,
             power,
+            lqi: None,
             time: Some(time),
         });
 
@@ -507,21 +408,22 @@ unsafe extern "C" fn nrf_802154_transmitted_raw(
         if !p_metadata.data.transmitted.p_ack.is_null() {
             let len = p_metadata.data.transmitted.length;
 
-            state.tx_ack.copy_from_slice(unsafe {
-                core::slice::from_raw_parts(p_metadata.data.transmitted.p_ack, len as usize)
-            });
+            let packet = unsafe { core::slice::from_raw_parts(p_metadata.data.transmitted.p_ack, len as usize) };
 
-            state.status = RadioStatus::TransmitDone(Some(TxAckFrameDetails {
+            state.rx.copy_from_slice(&packet[1..][..len as _]);
+
+            state.status = RadioStatus::TransmitDone(Some(PsduMeta {
+                len,
                 power: p_metadata.data.transmitted.power,
-                lqi: p_metadata.data.transmitted.lqi,
-                time: p_metadata.data.transmitted.time,
+                lqi: Some(p_metadata.data.transmitted.lqi),
+                time: Some(p_metadata.data.transmitted.time),
             }));
 
             unsafe {
                 raw::nrf_802154_buffer_free_raw(p_metadata.data.transmitted.p_ack);
             }
         } else {
-            state.tx_ack.set_len(0);
+            state.status = RadioStatus::TransmitDone(None);
         }
     });
 }
