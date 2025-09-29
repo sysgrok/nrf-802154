@@ -1,0 +1,9 @@
+[submodule "nrf-802154-sys/third_party/arm/CMSIS_5"]
+	path = nrf-802154-sys/third_party/arm/CMSIS_5
+	url = https://github.com/ARM-software/CMSIS_5.git
+[submodule "nrf-802154-sys/third_party/nordic/nrfx"]
+	path = nrf-802154-sys/third_party/nordic/nrfx
+	url = https://github.com/NordicSemiconductor/nrfx.git
+[submodule "nrf-802154-sys/third_party/nordic/nrfxlib"]
+	path = nrf-802154-sys/third_party/nordic/nrfxlib
+	url = https://github.com/nrfconnect/sdk-nrfxlib.git
