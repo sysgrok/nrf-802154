@@ -1,0 +1,11 @@
+[package]
+name = "nrf-802154-sys"
+authors = ["Ivan Markov <ivan.markov@sysgrok.com>"]
+version = "0.0.0"
+edition = "2021"
+description = "Crate name reserved for the nrf-802154 project"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sysgrok/nrf-802154"
+rust-version = "1.77"
+
+[dependencies]
