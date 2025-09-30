@@ -35,6 +35,11 @@ impl PsduMeta {
             rssi: Some(self.power),
         }
     }
+
+    fn write_crc(&self, buf: &mut [u8]) {
+        let len = self.len as usize;
+        buf[len..len + 2].copy_from_slice(self.crc.to_le_bytes().as_slice());
+    }
 }
 
 impl<T: embassy_nrf::radio::Instance> openthread::Radio for Radio<'_, T> {
@@ -95,8 +100,7 @@ impl<T: embassy_nrf::radio::Instance> openthread::Radio for Radio<'_, T> {
 
         Ok(if let Some(meta) = meta {
             if let Some(ack_psdu_buf) = ack_psdu_buf {
-                let len = meta.len as usize;
-                ack_psdu_buf[len..len + 2].copy_from_slice(meta.crc.to_le_bytes().as_slice());
+                meta.write_crc(ack_psdu_buf);
             }
 
             Some(meta.as_openthread(self.channel()))
@@ -115,8 +119,7 @@ impl<T: embassy_nrf::radio::Instance> openthread::Radio for Radio<'_, T> {
         let len = psdu_buf.len();
         let meta = Radio::receive(self, &mut psdu_buf[..len - 2]).await?;
 
-        let len = meta.len as usize;
-        psdu_buf[len..len + 2].copy_from_slice(meta.crc.to_le_bytes().as_slice());
+        meta.write_crc(psdu_buf);
 
         Ok(meta.as_openthread(self.channel()))
     }
