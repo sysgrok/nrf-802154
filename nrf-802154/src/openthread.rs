@@ -42,7 +42,7 @@ impl PsduMeta {
     }
 }
 
-impl<T: embassy_nrf::radio::Instance> openthread::Radio for Radio<'_, T> {
+impl openthread::Radio for Radio<'_> {
     type Error = Error;
 
     fn caps(&mut self) -> openthread::Capabilities {

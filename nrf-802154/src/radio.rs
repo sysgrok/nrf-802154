@@ -1,4 +1,5 @@
 use core::cell::RefCell;
+use core::marker::PhantomData;
 
 use embassy_nrf::radio::{Instance, InterruptHandler};
 use embassy_nrf::{interrupt, Peri};
@@ -86,14 +87,15 @@ pub struct PsduMeta {
 }
 
 /// IEEE 802.15.4 radio driver.
-pub struct Radio<'d, T: Instance> {
-    _p: Peri<'d, T>,
+pub struct Radio<'d> {
+    _p: PhantomData<&'d mut ()>,
 }
 
-impl<'d, T: Instance> Radio<'d, T> {
+impl<'d> Radio<'d> {
     /// Create a new IEEE 802.15.4 radio driver.
-    pub fn new(
-        radio: Peri<'d, T>,
+    pub fn new<T: Instance>(
+        _radio: Peri<'d, T>,
+        _egu: Peri<'d, embassy_nrf::peripherals::EGU0>,
         _irq: impl interrupt::typelevel::Binding<T::Interrupt, InterruptHandler<T>> + 'd,
     ) -> Self {
         unsafe {
@@ -115,7 +117,7 @@ impl<'d, T: Instance> Radio<'d, T> {
             });
         }
 
-        Self { _p: radio }
+        Self { _p: PhantomData }
     }
 
     /// Get the current radio channel
@@ -376,10 +378,7 @@ impl<'d, T: Instance> Radio<'d, T> {
     }
 }
 
-impl<T> Drop for Radio<'_, T>
-where
-    T: Instance,
-{
+impl Drop for Radio<'_> {
     fn drop(&mut self) {
         self.disable();
 
