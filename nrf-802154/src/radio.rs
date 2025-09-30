@@ -79,7 +79,7 @@ pub struct PsduMeta {
     pub crc: u16,
     /// Received signal power in dBm
     pub power: i8,
-    /// Link Quality Indicator of the received ACK frame
+    /// Link Quality Indicator of the received frame
     pub lqi: Option<u8>,
     /// Timestamp taken when the last symbol of the frame was received
     pub time: Option<u64>,
