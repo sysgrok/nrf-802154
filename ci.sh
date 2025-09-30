@@ -18,4 +18,4 @@ cargo clippy -p nrf-802154 --features nrf52832
 cargo clippy -p nrf-802154 --features nrf52833
 cargo clippy -p nrf-802154 --features nrf52840
 cargo clippy -p nrf-802154 --features nrf5340-net --target thumbv8m.main-none-eabi
-cargo clippy -p nrf-802154 --features nrf52840,defmt
+cargo clippy -p nrf-802154 --features nrf52840,defmt,openthread

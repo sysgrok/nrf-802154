@@ -132,13 +132,15 @@
 #![deny(missing_docs)]
 
 /// The error types, re-exported from `nrf-mpsl`.
-pub use mpsl::{Error, RetVal};
+pub use mpsl::{Error as MpslError, RetVal as MpslRetval};
 /// Re-export of the `nrf-mpsl` and `nrf-802154-sys` crates.
 pub use {nrf_802154_sys as raw, nrf_mpsl as mpsl};
+
+pub use radio::*;
 
 // This mod MUST go first, so that the others see its macros.
 pub(crate) mod fmt;
 
+#[cfg(feature = "openthread")]
+mod openthread;
 mod radio;
-
-pub use radio::*;

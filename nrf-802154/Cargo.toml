@@ -14,6 +14,7 @@ default-target = "thumbv7em-none-eabihf"
 targets = ["thumbv7em-none-eabihf"]
 
 [features]
+#default = ["nrf52840", "defmt", "openthread"]
 nrf52805 = ["nrf-mpsl/nrf52805", "nrf52"]
 nrf52810 = ["nrf-mpsl/nrf52810", "nrf52"]
 nrf52811 = ["nrf-mpsl/nrf52811", "nrf52"]
@@ -32,7 +33,7 @@ log = ["dep:log", "nrf-mpsl/log"]
 [dependencies]
 defmt = { version = "1", optional = true }
 log = { version = "0.4.27", optional = true }
-
+openthread = { version = "0.1.0", optional = true }
 nrf-mpsl = "0.3.0"
 nrf-802154-sys = { version = "0.1.0", path = "../nrf-802154-sys" }
 

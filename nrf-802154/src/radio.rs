@@ -19,23 +19,47 @@ const MAX_PACKET_SIZE: usize = 128;
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
 pub enum Error {
+    /// The data to transmit is too large
     TransmitDataTooLarge,
+    /// The buffer provided to receive a frame is too small
     ReceiveBufTooSmall,
+    /// Could not schedule the transmission (radio busy, etc)
     ScheduleTransmit,
+    /// Could not enter receive mode
     EnterReceive,
+    /// Transmission failed (no ACK received, etc)
     Transmit,
+    /// Reception failed (CRC error, aborted, etc)
     Receive,
 }
 
-// TODO expose the other variants in `pac::CCAMODE_A`
 /// Clear Channel Assessment method
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Cca {
     /// Carrier sense
-    CarrierSense,
+    #[default]
+    Carrier,
     /// Energy Detection / Energy Above Threshold
-    EnergyDetection {
+    Ed {
+        /// Energy measurements above this value mean that the channel is assumed to be busy.
+        /// Note the measurement range is 0..0xFF - where 0 means that the received power was
+        /// less than 10 dB above the selected receiver sensitivity. This value is not given in dBm,
+        /// but can be converted. See the nrf52840 Product Specification Section 6.20.12.4
+        /// for details.
+        ed_threshold: u8,
+    },
+    /// Carrier sense or Energy Detection
+    CarrierOrEd {
+        /// Energy measurements above this value mean that the channel is assumed to be busy.
+        /// Note the measurement range is 0..0xFF - where 0 means that the received power was
+        /// less than 10 dB above the selected receiver sensitivity. This value is not given in dBm,
+        /// but can be converted. See the nrf52840 Product Specification Section 6.20.12.4
+        /// for details.
+        ed_threshold: u8,
+    },
+    /// Carrier sense and Energy Detection
+    CarrierAndEd {
         /// Energy measurements above this value mean that the channel is assumed to be busy.
         /// Note the measurement range is 0..0xFF - where 0 means that the received power was
         /// less than 10 dB above the selected receiver sensitivity. This value is not given in dBm,
@@ -94,6 +118,11 @@ impl<'d, T: Instance> Radio<'d, T> {
         Self { _p: radio }
     }
 
+    /// Get the current radio channel
+    pub fn channel(&self) -> u8 {
+        unsafe { raw::nrf_802154_channel_get() }
+    }
+
     /// Change the radio channel
     pub fn set_channel(&mut self, channel: u8) {
         if !(11..=26).contains(&channel) {
@@ -104,15 +133,104 @@ impl<'d, T: Instance> Radio<'d, T> {
         }
     }
 
+    /// Get the current Clear Channel Assessment method
+    pub fn cca(&self) -> Cca {
+        let mut cfg = raw::nrf_802154_cca_cfg_t {
+            mode: 0,
+            ed_threshold: 0,
+            corr_threshold: 0,
+            corr_limit: 0,
+        };
+
+        unsafe {
+            raw::nrf_802154_cca_cfg_get(&mut cfg);
+        }
+
+        match cfg.mode {
+            raw::NRF_RADIO_CCA_MODE_CARRIER => Cca::Carrier,
+            raw::NRF_RADIO_CCA_MODE_ED => Cca::Ed {
+                ed_threshold: cfg.ed_threshold,
+            },
+            raw::NRF_RADIO_CCA_MODE_CARRIER_OR_ED => Cca::CarrierOrEd {
+                ed_threshold: cfg.ed_threshold,
+            },
+            raw::NRF_RADIO_CCA_MODE_CARRIER_AND_ED => Cca::CarrierAndEd {
+                ed_threshold: cfg.ed_threshold,
+            },
+            _ => unreachable!(),
+        }
+    }
+
     /// Change the Clear Channel Assessment method
-    pub fn set_cca(&mut self, _cca: Cca) {
-        // TODO
+    pub fn set_cca(&mut self, cca: Cca) {
+        let (mode, ed_threshold) = match cca {
+            Cca::Carrier => (raw::NRF_RADIO_CCA_MODE_CARRIER, 0),
+            Cca::Ed { ed_threshold } => (raw::NRF_RADIO_CCA_MODE_ED, ed_threshold),
+            Cca::CarrierOrEd { ed_threshold } => (raw::NRF_RADIO_CCA_MODE_CARRIER_OR_ED, ed_threshold),
+            Cca::CarrierAndEd { ed_threshold } => (raw::NRF_RADIO_CCA_MODE_CARRIER_AND_ED, ed_threshold),
+        };
+
+        unsafe {
+            raw::nrf_802154_cca_cfg_set(&raw::nrf_802154_cca_cfg_t {
+                mode,
+                ed_threshold,
+                corr_threshold: 0,
+                corr_limit: 0,
+            });
+        }
+    }
+
+    /// Get the current radio transmission power
+    pub fn tx_power(&self) -> i8 {
+        unsafe { raw::nrf_802154_tx_power_get() }
     }
 
     /// Change the radio transmission power
-    pub fn set_transmission_power(&mut self, power: i8) {
+    pub fn set_tx_power(&mut self, power: i8) {
         unsafe {
             raw::nrf_802154_tx_power_set(power);
+        }
+    }
+
+    /// Set the PAN ID of the device
+    ///
+    /// # Arguments
+    /// - `pan_id`: The PAN ID to set. If `None`, the PAN ID filtering is disabled.
+    pub fn set_pan_id(&mut self, pan_id: Option<u16>) {
+        unsafe {
+            if let Some(pan_id) = pan_id {
+                raw::nrf_802154_pan_id_set(pan_id.to_le_bytes().as_slice().as_ptr());
+            } else {
+                raw::nrf_802154_pan_id_set(core::ptr::null());
+            }
+        }
+    }
+
+    /// Set the short address of the device
+    ///
+    /// # Arguments
+    /// - `addr_id`: The short address to set. If `None`, the short address filtering is disabled.
+    pub fn set_short_addr(&mut self, addr_id: Option<u16>) {
+        unsafe {
+            if let Some(addr_id) = addr_id {
+                raw::nrf_802154_short_address_set(addr_id.to_be_bytes().as_slice().as_ptr());
+            } else {
+                raw::nrf_802154_short_address_set(core::ptr::null());
+            }
+        }
+    }
+
+    /// Set the extended address of the device
+    ///
+    /// # Arguments
+    /// - `ext_addr_id`: The extended address to set. If `None`, the extended address filtering is disabled.
+    pub fn set_ext_addr(&mut self, ext_addr_id: Option<u64>) {
+        unsafe {
+            if let Some(ext_addr_id) = ext_addr_id {
+                raw::nrf_802154_extended_address_set(ext_addr_id.to_be_bytes().as_slice().as_ptr());
+            } else {
+                raw::nrf_802154_extended_address_set(core::ptr::null());
+            }
         }
     }
 
