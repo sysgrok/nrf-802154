@@ -148,16 +148,17 @@ impl<'d> Radio<'d> {
             raw::nrf_802154_cca_cfg_get(&mut cfg);
         }
 
+        // TODO: Solve the i8 vs u8 mismatch
         match cfg.mode {
             raw::NRF_RADIO_CCA_MODE_CARRIER => Cca::Carrier,
             raw::NRF_RADIO_CCA_MODE_ED => Cca::Ed {
-                ed_threshold: cfg.ed_threshold,
+                ed_threshold: cfg.ed_threshold as _,
             },
             raw::NRF_RADIO_CCA_MODE_CARRIER_OR_ED => Cca::CarrierOrEd {
-                ed_threshold: cfg.ed_threshold,
+                ed_threshold: cfg.ed_threshold as _,
             },
             raw::NRF_RADIO_CCA_MODE_CARRIER_AND_ED => Cca::CarrierAndEd {
-                ed_threshold: cfg.ed_threshold,
+                ed_threshold: cfg.ed_threshold as _,
             },
             _ => unreachable!(),
         }
@@ -172,10 +173,11 @@ impl<'d> Radio<'d> {
             Cca::CarrierAndEd { ed_threshold } => (raw::NRF_RADIO_CCA_MODE_CARRIER_AND_ED, ed_threshold),
         };
 
+        // TODO: Solve the i8 vs u8 mismatch
         unsafe {
             raw::nrf_802154_cca_cfg_set(&raw::nrf_802154_cca_cfg_t {
                 mode,
-                ed_threshold,
+                ed_threshold: ed_threshold as _,
                 corr_threshold: 0,
                 corr_limit: 0,
             });

@@ -37,6 +37,6 @@ openthread = { version = "0.1.0", optional = true }
 nrf-mpsl = "0.3.0"
 nrf-802154-sys = { version = "0.1.0", path = "../nrf-802154-sys" }
 
-embassy-nrf = "0.7"
+embassy-nrf = "0.8"
 embassy-sync = "0.7"
 critical-section = "1.2.0"

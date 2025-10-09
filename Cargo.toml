@@ -18,6 +18,7 @@ opt-level = 'z'
 overflow-checks = false
 
 [patch.crates-io]
+nrf-mpsl = { git = "https://github.com/alexmoon/nrf-sdc" }
 openthread = { git = "https://github.com/esp-rs/openthread" }
 #embassy-executor = { path = "../embassy/embassy-executor" }
 #embassy-nrf = {path = "../embassy/embassy-nrf"}
