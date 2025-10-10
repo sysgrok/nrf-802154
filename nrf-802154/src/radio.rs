@@ -1,8 +1,8 @@
 use core::cell::RefCell;
 use core::marker::PhantomData;
 
-use embassy_nrf::radio::{Instance, InterruptHandler};
-use embassy_nrf::{interrupt, Peri};
+use embassy_nrf::radio::Instance;
+use embassy_nrf::Peri;
 use embassy_sync::blocking_mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
@@ -96,7 +96,7 @@ impl<'d> Radio<'d> {
     pub fn new<T: Instance>(
         _radio: Peri<'d, T>,
         _egu: Peri<'d, embassy_nrf::peripherals::EGU0>,
-        _irq: impl interrupt::typelevel::Binding<T::Interrupt, InterruptHandler<T>> + 'd,
+        _mpsl: &'d nrf_mpsl::MultiprotocolServiceLayer<'_>,
     ) -> Self {
         unsafe {
             raw::nrf_802154_init();

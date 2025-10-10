@@ -38,7 +38,7 @@ struct Target {
     target: String,
     cpu: &'static str,
     float_abi: &'static str,
-    _chip_family: &'static str,
+    chip_family: &'static str,
     chip: &'static str,
     core: Option<&'static str>,
     chip_core: Option<&'static str>,
@@ -47,12 +47,12 @@ struct Target {
 impl Target {
     fn new(series: Series, target: String) -> Self {
         let (cpu, float_abi, chip_family, chip, core, chip_core) = match (series, target.as_str()) {
-            (Series::Nrf52, "thumbv7em-none-eabihf") => ("cortex-m4", "hard", "nrf52", "NRF52840_XXAA", None, None),
-            (Series::Nrf52, "thumbv7em-none-eabi") => ("cortex-m4", "soft", "nrf52", "NRF52840_XXAA", None, None),
+            (Series::Nrf52, "thumbv7em-none-eabihf") => ("cortex-m4", "hard", "nrf52840", "NRF52840_XXAA", None, None),
+            (Series::Nrf52, "thumbv7em-none-eabi") => ("cortex-m4", "soft", "nrf52840", "NRF52840_XXAA", None, None),
             (Series::Nrf53, "thumbv8m.main-none-eabi") => (
                 "cortex-m33+nodsp",
                 "soft",
-                "nrf53",
+                "nrf5340",
                 "NRF5340_XXAA",
                 Some("NRF_NETWORK"),
                 Some("NRF5340_XXAA_NETWORK"),
@@ -60,7 +60,7 @@ impl Target {
             (Series::Nrf54l, "thumbv8m.main-none-eabihf") => (
                 "cortex-m33",
                 "hard",
-                "nrf54l",
+                "nrf54l15_cpuapp",
                 "NRF54L15_XXAA",
                 Some("NRF_APPLICATION"),
                 None,
@@ -68,7 +68,7 @@ impl Target {
             (Series::Nrf54l, "thumbv8m.main-none-eabi") => (
                 "cortex-m33",
                 "soft",
-                "nrf54l",
+                "nrf54l15_cpuapp",
                 "NRF54L15_XXAA",
                 Some("NRF_APPLICATION"),
                 None,
@@ -76,7 +76,7 @@ impl Target {
             (Series::Nrf54lNs, "thumbv8m.main-none-eabihf") => (
                 "cortex-m33",
                 "hard",
-                "nrf54l_ns",
+                "nrf54l15_cpuapp_ns",
                 "NRF54L15_XXAA",
                 Some("NRF_APPLICATION"),
                 None,
@@ -84,7 +84,7 @@ impl Target {
             (Series::Nrf54lNs, "thumbv8m.main-none-eabi") => (
                 "cortex-m33",
                 "soft",
-                "nrf54l_ns",
+                "nrf54l15_cpuapp_ns",
                 "NRF54L15_XXAA",
                 Some("NRF_APPLICATION"),
                 None,
@@ -92,7 +92,7 @@ impl Target {
             (Series::Nrf54h, "thumbv8m.main-none-eabihf") => (
                 "cortex-m33",
                 "hard",
-                "nrf54h",
+                "nrf54h20_cpurad",
                 "NRF54H20_XXAA",
                 Some("NRF_RADIOCORE"),
                 None,
@@ -100,7 +100,7 @@ impl Target {
             (Series::Nrf54h, "thumbv8m.main-none-eabi") => (
                 "cortex-m33",
                 "soft",
-                "nrf54h",
+                "nrf54h20_cpurad",
                 "NRF54H20_XXAA",
                 Some("NRF_RADIOCORE"),
                 None,
@@ -112,7 +112,7 @@ impl Target {
             target,
             cpu,
             float_abi,
-            _chip_family: chip_family,
+            chip_family,
             chip,
             core,
             chip_core,
@@ -121,6 +121,19 @@ impl Target {
 }
 
 fn bindgen(target: &Target) -> bindgen::Builder {
+    // NOTE:
+    // This is a terrible hack for (seemingly)
+    // `nrf_802154_swi.c` NOT including `nrf_802154_peripherals.h` directly or indirectly
+    // while it should, as it references `NRF_802154_EGU_INSTANCE` which is defined by that header.
+    let nrf_802154_egu_instance_workaround = format!(
+        "-DNRF_802154_EGU_INSTANCE={}",
+        match Series::get() {
+            Series::Nrf52 | Series::Nrf53 => "NRF_EGU0",
+            Series::Nrf54l | Series::Nrf54lNs => "NRF_EGU10",
+            Series::Nrf54h => "NRF_EGU020",
+        }
+    );
+
     bindgen::Builder::default()
         .use_core()
         .size_t_is_usize(true)
@@ -128,6 +141,7 @@ fn bindgen(target: &Target) -> bindgen::Builder {
         .clang_arg(format!("-mcpu={}", target.cpu))
         .clang_arg(format!("-mfloat-abi={}", target.float_abi))
         .clang_arg("-mthumb")
+        .clang_arg("-fshort-enums")
         .clang_arg("-I./third_party/arm/CMSIS_5/CMSIS/Core/Include")
         .clang_arg("-I./include")
         .clang_arg("-I./third_party/nordic/nrfx")
@@ -137,6 +151,9 @@ fn bindgen(target: &Target) -> bindgen::Builder {
         .clang_arg("-I./third_party/nordic/nrfxlib/nrf_802154/sl/include")
         .clang_arg("-I./third_party/nordic/nrfx/templates")
         .clang_arg(format!("-D{}", target.chip))
+        .clang_arg("-DCONFIG_MPSL")
+        .clang_arg("-DNRF_802154_INTERNAL_SWI_IRQ_HANDLING=0")
+        .clang_arg(&nrf_802154_egu_instance_workaround)
         .clang_args(target.core.map(|x| format!("-D{}", x)))
         .clang_args(target.chip_core.map(|x| format!("-D{}", x)))
         .prepend_enum_name(false)
@@ -193,7 +210,7 @@ fn build(target: &Target) {
         .define(
             "CMAKE_C_FLAGS",
             format!(
-                "-Werror=implicit-function-declaration -fshort-enums -DNRF_802154_INTERNAL_SWI_IRQ_HANDLING=0 {} {} {}",
+                "-Werror=implicit-function-declaration -fshort-enums -DCONFIG_MPSL -DNRF_802154_INTERNAL_SWI_IRQ_HANDLING=0 {} {} {}",
                 nrf_802154_egu_instance_workaround, nrf_target_args, include_paths_args
             ),
         )
@@ -216,6 +233,8 @@ fn main() {
 
     build(&target);
 
+    let out_path = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+
     let bindings = bindgen(&target)
         .header("./third_party/nordic/nrfxlib/nrf_802154/common/include/nrf_802154.h")
         .generate()
@@ -225,20 +244,24 @@ fn main() {
         .write(true)
         .truncate(true)
         .create(true)
-        .open(PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("bindings.rs"))
+        .open(out_path.join("bindings.rs"))
         .unwrap();
     bindings.write(Box::new(&file)).expect("Couldn't write bindgen output");
 
     let lib_sl_path = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
-        .join("third_party/nordic/nrfxlib/nrf_802154/sl/lib")
-        .join(target._chip_family)
+        .join("third_party/nordic/nrfxlib/nrf_802154/sl/sl/lib")
+        .join(target.chip_family)
         .join(format!("{}-float", target.float_abi));
 
-    let lib_target_path = PathBuf::from(env::var_os("TARGET").unwrap());
-    let lib_driver_path = lib_target_path.join("driver");
-    let lib_common_path = lib_target_path.join("common");
+    let lib_out_path = out_path.join("build");
+    let lib_driver_path = lib_out_path.join("driver");
+    let lib_common_path = lib_out_path.join("common");
 
     println!("cargo:rustc-link-search={}", lib_sl_path.to_str().unwrap());
     println!("cargo:rustc-link-search={}", lib_driver_path.to_str().unwrap());
     println!("cargo:rustc-link-search={}", lib_common_path.to_str().unwrap());
+
+    println!("cargo:rustc-link-lib=static=nrf-802154-driver");
+    println!("cargo:rustc-link-lib=static=nrf-802154-common");
+    println!("cargo:rustc-link-lib=static=nrf-802154-sl");
 }

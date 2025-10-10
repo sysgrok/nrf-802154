@@ -17,8 +17,8 @@ mod bindings {
         unused_parens
     )]
 
-    #[allow(unused_imports)]
-    use nrf_mpsl_sys::*;
+    // #[allow(unused_imports)]
+    // use nrf_mpsl_sys::*;
 
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }

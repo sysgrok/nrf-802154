@@ -44,14 +44,14 @@ default-target = "thumbv7em-none-eabihf"
 targets = ["thumbv7em-none-eabihf"]
 
 [features]
-nrf52 = ["nrf-mpsl-sys/nrf52"]
-nrf53 = ["nrf-mpsl-sys/nrf53"]
-nrf54l-ns = ["nrf-mpsl-sys/nrf54l-ns"]
-nrf54l-s = ["nrf-mpsl-sys/nrf54l-s"]
-nrf54h = ["nrf-mpsl-sys/nrf54h"]
+nrf52 = []
+nrf53 = []
+nrf54l-ns = []
+nrf54l-s = []
+nrf54h = []
 
-[dependencies]
-nrf-mpsl-sys = "0.2.0"
+#[dependencies]
+#nrf-mpsl-sys = "0.2.0"
 
 [build-dependencies]
 bindgen = "0.72.0"
