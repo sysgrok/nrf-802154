@@ -142,4 +142,5 @@ pub(crate) mod fmt;
 
 #[cfg(feature = "openthread")]
 mod openthread;
+mod platform;
 mod radio;
