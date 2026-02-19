@@ -578,7 +578,9 @@ extern "C" fn nrf_802154_platform_sl_lptimer_hw_task_update_ppi(_ppi_channel: u3
     if LP_HW_TASK_ACTIVE.load(Ordering::Acquire) == 0 {
         return LPTIMER_WRONG_STATE;
     }
-    LPTIMER_SUCCESS
+    // PPI/DPPI channel retargeting is not supported by this platform.
+    // Return wrong state so the caller doesn't assume the routing was updated.
+    LPTIMER_WRONG_STATE
 }
 
 #[no_mangle]

@@ -123,14 +123,16 @@ impl<'d> Radio<'d> {
     /// use embassy_nrf::bind_interrupts;
     ///
     /// bind_interrupts!(struct Irqs {
-    ///     // MPSL interrupts
-    ///     SWI0_EGU0 => nrf_mpsl::LowPrioInterruptHandler;
+    ///     // MPSL and 802.15.4 share the EGU0/SWI0 interrupt line.
+    ///     // Both handlers are dispatched when this interrupt fires.
+    ///     EGU0_SWI0 => nrf_mpsl::LowPrioInterruptHandler;
+    ///     EGU0_SWI0 => nrf_802154::Egu0InterruptHandler;
+    ///     // Other MPSL interrupts
     ///     RADIO => nrf_mpsl::HighPrioInterruptHandler;
     ///     TIMER0 => nrf_mpsl::HighPrioInterruptHandler;
     ///     RTC0 => nrf_mpsl::HighPrioInterruptHandler;
     ///     POWER_CLOCK => nrf_mpsl::ClockInterruptHandler;
-    ///     // 802.15.4 driver interrupts
-    ///     EGU0_SWI0 => nrf_802154::Egu0InterruptHandler;
+    ///     // 802.15.4 LP timer
     ///     RTC2 => nrf_802154::LpTimerInterruptHandler;  // or RTC1 on chips without RTC2
     /// });
     /// ```
