@@ -392,19 +392,31 @@ fn lp_current_lpticks() -> u64 {
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lp_timer_init() {
     let rtc = lp_timer();
+
+    // Reset state to safe sentinels
+    LP_OVERFLOW_COUNT.store(0, Ordering::Release);
+    critical_section::with(|cs| {
+        LP_FIRE_LPTICKS.borrow(cs).set(u64::MAX);
+        LP_SYNC_LPTICKS.borrow(cs).set(u64::MAX);
+    });
+
     // No prescaler -> 32.768 kHz
     rtc.prescaler().write(|w| w.set_prescaler(0));
-    // Enable overflow interrupt for 64-bit tracking
+
+    // Clear any stale events before enabling interrupts to avoid spurious ISR fires
+    rtc.events_ovrflw().write_value(0);
+    rtc.events_compare(0).write_value(0);
+    rtc.events_compare(1).write_value(0);
+    rtc.events_compare(2).write_value(0);
+
+    // Enable overflow interrupt for 64-bit tracking.
+    // Compare[0] and compare[1] interrupts are enabled on-demand by schedule_at
+    // and sync_schedule_now/at respectively, so only overflow is enabled at init.
     rtc.intenset().write(|w| w.set_ovrflw(true));
-    // Enable compare[0] interrupt for scheduled events
-    rtc.intenset().write(|w| w.set_compare(0, true));
-    // Enable compare[1] interrupt for sync events
-    rtc.intenset().write(|w| w.set_compare(1, true));
     // Enable compare[2] event routing for hw tasks
     rtc.evtenset().write(|w| w.set_compare(2, true));
     // Start the RTC
     rtc.tasks_start().write_value(1);
-    LP_OVERFLOW_COUNT.store(0, Ordering::Release);
 }
 
 #[no_mangle]
@@ -460,20 +472,22 @@ extern "C" fn nrf_802154_platform_sl_lptimer_lpticks_to_us_convert(lpticks: u64)
 extern "C" fn nrf_802154_platform_sl_lptimer_schedule_at(fire_lpticks: u64) {
     critical_section::with(|cs| LP_FIRE_LPTICKS.borrow(cs).set(fire_lpticks));
     let rtc = lp_timer();
-    // Set compare[0] to the lower 24 bits of the target
-    let cc_val = (fire_lpticks & RTC_COUNTER_MAX as u64) as u32;
-    rtc.cc(0).write(|w| w.set_compare(cc_val));
-    rtc.events_compare(0).write_value(0);
-    rtc.intenset().write(|w| w.set_compare(0, true));
 
     // Per the C header contract: "If fire_lpticks are in the past, the lptimer
     // event will be triggered asap, but still from the context of an lptimer's ISR."
-    // Without this check, a past fire time would not trigger the compare event until
-    // the 24-bit counter wraps (~512 seconds). Pending the interrupt ensures the ISR
-    // runs promptly and dispatches via its `now >= fire` check.
-    if fire_lpticks <= lp_current_lpticks() {
-        cortex_m::peripheral::NVIC::pend(lp_timer_irqn());
-    }
+    // The ISR dispatches only when EVENTS_COMPARE[0] is set by hardware, so a plain
+    // NVIC pend wouldn't work. Instead, program CC[0] to an imminent value so the
+    // hardware compare fires within ~2 ticks, setting the event flag and triggering
+    // the ISR which then checks `now >= fire`.
+    let cc_val = if fire_lpticks <= lp_current_lpticks() {
+        let now_cc = rtc.counter().read().counter();
+        now_cc.wrapping_add(2) & RTC_COUNTER_MAX
+    } else {
+        (fire_lpticks & RTC_COUNTER_MAX as u64) as u32
+    };
+    rtc.cc(0).write(|w| w.set_compare(cc_val));
+    rtc.events_compare(0).write_value(0);
+    rtc.intenset().write(|w| w.set_compare(0, true));
 }
 
 #[no_mangle]
