@@ -240,10 +240,14 @@ extern "C" fn nrf_802154_hp_timer_sync_prepare() {
 
 #[no_mangle]
 extern "C" fn nrf_802154_hp_timer_sync_time_get(p_timestamp: *mut u32) -> bool {
+    if p_timestamp.is_null() {
+        return false;
+    }
     if HP_SYNC_CAPTURED.load(Ordering::Acquire) {
         let timer = hp_timer();
         let val = timer.cc(1).read();
-        // Safety: the C driver guarantees p_timestamp is a valid, non-null pointer.
+        // Safety: null check above guarantees p_timestamp is non-null.
+        // The C driver guarantees it points to a valid uint32_t.
         unsafe { p_timestamp.write(val) };
         true
     } else {
@@ -523,7 +527,11 @@ extern "C" fn nrf_802154_platform_sl_lptimer_critical_section_exit() {
     // Guard against underflow: if the counter is already 0, do nothing.
     // This prevents a C-side bug from wrapping to u32::MAX and permanently masking the IRQ.
     let prev = LP_CRIT_SECT_CNT.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
-        if v == 0 { None } else { Some(v - 1) }
+        if v == 0 {
+            None
+        } else {
+            Some(v - 1)
+        }
     });
     if prev == Ok(1) {
         // Last nesting level — re-enable the RTC interrupt.
@@ -726,6 +734,12 @@ extern "C" fn nrf_802154_irq_init(irqn: u32, prio: i32, isr: Option<IrqHandler>)
             // The C driver calls nrf_802154_irq_init during initialization, before
             // nrf_802154_irq_enable is called, so the interrupt is guaranteed to be
             // disabled at this point. Setting priority on a disabled interrupt is safe.
+            //
+            // SAFETY: `Peripherals::steal()` is used because we don't own the
+            // core peripherals singleton. This is safe here because:
+            // 1. This runs during driver init before interrupts are enabled
+            // 2. We only access NVIC to set a priority on a disabled interrupt
+            // 3. No concurrent NVIC access is possible at this point
             let mut nvic = cortex_m::Peripherals::steal().NVIC;
             cortex_m::peripheral::NVIC::set_priority(&mut nvic, IrqNumber(irqn as u16), clamped_prio);
         }

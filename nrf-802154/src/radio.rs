@@ -127,6 +127,9 @@ impl<'d> Radio<'d> {
     ///     // Both handlers are dispatched when this interrupt fires.
     ///     EGU0_SWI0 => nrf_mpsl::LowPrioInterruptHandler;
     ///     EGU0_SWI0 => nrf_802154::Egu0InterruptHandler;
+    ///     // On nRF5340-net, use EGU0 instead:
+    ///     // EGU0 => nrf_mpsl::LowPrioInterruptHandler;
+    ///     // EGU0 => nrf_802154::Egu0InterruptHandler;
     ///     // Other MPSL interrupts
     ///     RADIO => nrf_mpsl::HighPrioInterruptHandler;
     ///     TIMER0 => nrf_mpsl::HighPrioInterruptHandler;
