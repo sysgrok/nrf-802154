@@ -417,6 +417,10 @@ extern "C" fn nrf_802154_platform_sl_lp_timer_init() {
     rtc.evtenset().write(|w| w.set_compare(2, true));
     // Start the RTC
     rtc.tasks_start().write_value(1);
+
+    // Enable the NVIC line for the LP timer RTC interrupt so the ISR can fire.
+    // Without this, the RTC event flags would be set but never serviced.
+    unsafe { cortex_m::peripheral::NVIC::unmask(lp_timer_irqn()) };
 }
 
 #[no_mangle]
@@ -485,8 +489,11 @@ extern "C" fn nrf_802154_platform_sl_lptimer_schedule_at(fire_lpticks: u64) {
     } else {
         (fire_lpticks & RTC_COUNTER_MAX as u64) as u32
     };
-    rtc.cc(0).write(|w| w.set_compare(cc_val));
+    // Clear the event before writing CC[0] to avoid losing an immediate match:
+    // if the counter hits the new CC value right after writing, clearing after
+    // would erase the just-set event.
     rtc.events_compare(0).write_value(0);
+    rtc.cc(0).write(|w| w.set_compare(cc_val));
     rtc.intenset().write(|w| w.set_compare(0, true));
 }
 
@@ -513,7 +520,12 @@ extern "C" fn nrf_802154_platform_sl_lptimer_critical_section_enter() {
 
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_critical_section_exit() {
-    if LP_CRIT_SECT_CNT.fetch_sub(1, Ordering::AcqRel) == 1 {
+    // Guard against underflow: if the counter is already 0, do nothing.
+    // This prevents a C-side bug from wrapping to u32::MAX and permanently masking the IRQ.
+    let prev = LP_CRIT_SECT_CNT.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+        if v == 0 { None } else { Some(v - 1) }
+    });
+    if prev == Ok(1) {
         // Last nesting level — re-enable the RTC interrupt.
         unsafe { cortex_m::peripheral::NVIC::unmask(lp_timer_irqn()) };
     }
@@ -530,8 +542,11 @@ const LPTIMER_WRONG_STATE: u32 = 4;
 extern "C" fn nrf_802154_platform_sl_lptimer_hw_task_prepare(fire_lpticks: u64, _ppi_channel: u32) -> u32 {
     let rtc = lp_timer();
     let cc_val = (fire_lpticks & RTC_COUNTER_MAX as u64) as u32;
-    rtc.cc(2).write(|w| w.set_compare(cc_val));
+    // Clear event and disable routing before writing CC[2] to avoid losing
+    // an immediate match, then re-enable routing after.
+    rtc.evtenclr().write(|w| w.set_compare(2, true));
     rtc.events_compare(2).write_value(0);
+    rtc.cc(2).write(|w| w.set_compare(cc_val));
     rtc.evtenset().write(|w| w.set_compare(2, true));
     LP_HW_TASK_ACTIVE.store(1, Ordering::Release);
 
@@ -572,8 +587,9 @@ extern "C" fn nrf_802154_platform_sl_lptimer_sync_schedule_now() {
     let now = rtc.counter().read().counter();
     // Schedule compare[1] to fire at the next tick
     let cc_val = now.wrapping_add(2) & RTC_COUNTER_MAX;
-    rtc.cc(1).write(|w| w.set_compare(cc_val));
+    // Clear event before writing CC[1] to avoid losing an immediate match.
     rtc.events_compare(1).write_value(0);
+    rtc.cc(1).write(|w| w.set_compare(cc_val));
     rtc.intenset().write(|w| w.set_compare(1, true));
     rtc.evtenset().write(|w| w.set_compare(1, true));
     critical_section::with(|cs| LP_SYNC_LPTICKS.borrow(cs).set(lp_current_lpticks() + 2));
@@ -584,8 +600,9 @@ extern "C" fn nrf_802154_platform_sl_lptimer_sync_schedule_at(fire_lpticks: u64)
     critical_section::with(|cs| LP_SYNC_LPTICKS.borrow(cs).set(fire_lpticks));
     let rtc = lp_timer();
     let cc_val = (fire_lpticks & RTC_COUNTER_MAX as u64) as u32;
-    rtc.cc(1).write(|w| w.set_compare(cc_val));
+    // Clear event before writing CC[1] to avoid losing an immediate match.
     rtc.events_compare(1).write_value(0);
+    rtc.cc(1).write(|w| w.set_compare(cc_val));
     rtc.intenset().write(|w| w.set_compare(1, true));
     rtc.evtenset().write(|w| w.set_compare(1, true));
 }
