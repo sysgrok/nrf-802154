@@ -93,10 +93,26 @@ pub struct Radio<'d> {
 
 impl<'d> Radio<'d> {
     /// Create a new IEEE 802.15.4 radio driver.
+    ///
+    /// # Peripherals
+    ///
+    /// In addition to the RADIO peripheral and the EGU0/MPSL reference, this constructor
+    /// takes ownership of the timer and RTC peripherals used by the 802.15.4 platform layer:
+    /// - `TIMER2` — used as the high-precision (1 µs) timer
+    /// - `RTC2` (on nRF52832/52833/52840) or `RTC1` (on other chips) — used as the low-power timer
     pub fn new<T: Instance>(
         _radio: Peri<'d, T>,
         _egu: Peri<'d, embassy_nrf::peripherals::EGU0>,
         _mpsl: &'d nrf_mpsl::MultiprotocolServiceLayer<'_>,
+        _hp_timer: Peri<'d, embassy_nrf::peripherals::TIMER2>,
+        #[cfg(any(feature = "nrf52832", feature = "nrf52833", feature = "nrf52840"))] _lp_timer: Peri<
+            'd,
+            embassy_nrf::peripherals::RTC2,
+        >,
+        #[cfg(not(any(feature = "nrf52832", feature = "nrf52833", feature = "nrf52840")))] _lp_timer: Peri<
+            'd,
+            embassy_nrf::peripherals::RTC1,
+        >,
     ) -> Self {
         unsafe {
             raw::nrf_802154_init();
