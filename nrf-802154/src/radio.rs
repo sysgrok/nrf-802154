@@ -99,7 +99,14 @@ impl<'d> Radio<'d> {
     /// In addition to the RADIO peripheral and the EGU0/MPSL reference, this constructor
     /// takes ownership of the timer and RTC peripherals used by the 802.15.4 platform layer:
     /// - `TIMER2` — used as the high-precision (1 µs) timer
-    /// - `RTC2` (on nRF52832/52833/52840) or `RTC1` (on other chips) — used as the low-power timer
+    /// - Low-power RTC used internally by the Nordic 802.15.4 driver:
+    ///   - On nRF52832/52833/52840, this driver takes ownership of `RTC2`.
+    ///   - On other chips (nRF52805–nRF52820 and nRF5340-net), this driver takes
+    ///     ownership of `RTC1`.
+    ///
+    /// **Note:** `RTC1` is typically used by embassy-nrf's time driver. On chips without
+    /// `RTC2`, you must ensure that embassy's time driver is configured to use a different
+    /// timer or is disabled when this 802.15.4 driver is in use.
     pub fn new<T: Instance>(
         _radio: Peri<'d, T>,
         _egu: Peri<'d, embassy_nrf::peripherals::EGU0>,

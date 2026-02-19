@@ -22,7 +22,9 @@ extern "C" fn nrf_802154_temperature_deinit() {}
 #[no_mangle]
 extern "C" fn nrf_802154_temperature_get() -> i8 {
     let raw = unsafe { mpsl::raw::mpsl_temperature_get() };
-    (raw / 4) as i8
+    // MPSL returns 0.25°C units; convert to integer °C and clamp to i8 range
+    // in case MPSL returns an out-of-range or error value.
+    (raw / 4).clamp(i8::MIN as i32, i8::MAX as i32) as i8
 }
 
 // =============================================================================
@@ -169,6 +171,7 @@ extern "C" fn nrf_802154_hp_timer_sync_time_get(p_timestamp: *mut u32) -> bool {
     if HP_SYNC_CAPTURED.load(Ordering::Acquire) {
         let timer = hp_timer();
         let val = timer.cc(1).read();
+        // Safety: the C driver guarantees p_timestamp is a valid, non-null pointer.
         unsafe { p_timestamp.write(val) };
         true
     } else {
@@ -195,6 +198,11 @@ extern "C" fn nrf_802154_hp_timer_timestamp_get() -> u32 {
 // On nRF52 (PPI-based), no cross-domain connections are needed.
 // On nRF53 (DPPI-based), cross-domain connections would be needed but are not
 // yet implemented as they require specific DPPI channel routing.
+//
+// NOTE: These are currently minimal stubs. Frame timestamps will not be
+// accurate without a full PPI/DPPI timestamper implementation. The C driver's
+// SL layer handles the basic PPI routing, but cross-domain (nRF53) and
+// advanced timestamping scenarios are not supported yet.
 // =============================================================================
 
 #[no_mangle]
@@ -220,9 +228,15 @@ extern "C" fn nrf_802154_platform_timestamper_captured_timestamp_read(_p_capture
 // =============================================================================
 // SL LP Timer
 //
-// Low-Power Timer based on the RTC peripheral. Uses RTC2 on nRF52 (RTC0 is
-// reserved by MPSL, RTC1 is typically used by the embassy time driver) and
-// RTC1 on nRF53 (RTC0 is reserved by MPSL).
+// Low-Power Timer based on the RTC peripheral. Uses RTC2 on nRF52832/52833/
+// nRF52840 (RTC0 is reserved by MPSL, RTC1 is typically used by the embassy
+// time driver) and RTC1 on nRF52805–nRF52820 and nRF5340-net (RTC0 is
+// reserved by MPSL).
+//
+// NOTE: On chips without RTC2 (nRF52805–nRF52820, nRF5340-net), this driver
+// uses RTC1, which conflicts with embassy-nrf's default time driver. On those
+// chips, ensure that embassy's time driver is configured to use a different
+// timer or is disabled.
 //
 // The RTC runs at 32.768 kHz with a 24-bit counter. One lptick equals one RTC
 // tick (~30.5 µs). A 64-bit lptick counter is maintained by tracking overflows.
@@ -279,16 +293,15 @@ fn lp_timer() -> pac::rtc::Rtc {
 
 /// Reconstruct the full 64-bit lptick value from the 24-bit RTC counter.
 fn lp_current_lpticks() -> u64 {
-    // Read counter, then overflow, then counter again to detect races where
-    // the counter wraps but the overflow ISR has not yet updated LP_OVERFLOW_COUNT.
+    // Double-read the overflow counter around the counter read to detect
+    // races where an overflow ISR fires between the reads.
     let rtc = lp_timer();
     loop {
-        let cnt1 = rtc.counter().read().counter() as u64;
-        let ovf = LP_OVERFLOW_COUNT.load(Ordering::Acquire) as u64;
-        let cnt2 = rtc.counter().read().counter() as u64;
-        // If the counter decreased, a wrap occurred during the sequence; retry.
-        if cnt2 >= cnt1 {
-            return ovf * (RTC_COUNTER_MAX as u64 + 1) + cnt2;
+        let ovf1 = LP_OVERFLOW_COUNT.load(Ordering::Acquire) as u64;
+        let cnt = rtc.counter().read().counter() as u64;
+        let ovf2 = LP_OVERFLOW_COUNT.load(Ordering::Acquire) as u64;
+        if ovf1 == ovf2 {
+            return ovf1 * (RTC_COUNTER_MAX as u64 + 1) + cnt;
         }
     }
 }
@@ -507,11 +520,31 @@ extern "C" fn nrf_802154_platform_sl_lptimer_granularity_get() -> u32 {
 
 /// LP Timer (RTC) interrupt handler.
 ///
-/// This function must be called from the RTC interrupt handler for the LP timer instance
-/// (RTC2 on nRF52832/52833/52840, RTC1 on other chips). It handles:
+/// This function must be called from the RTC interrupt handler for the LP timer
+/// instance used by this driver:
+/// - `RTC2` on nRF52832/52833/52840
+/// - `RTC1` on nRF52805–nRF52820 and nRF5340-net
+///
+/// It handles:
 /// - Overflow events: increments the 64-bit lptick overflow counter.
-/// - Compare[0] events: fires scheduled timer callbacks via `nrf_802154_sl_timer_handler`.
-/// - Compare[1] events: fires sync callbacks via `nrf_802154_sl_timestamper_synchronized`.
+/// - Compare\[0\] events: fires scheduled timer callbacks via `nrf_802154_sl_timer_handler`.
+/// - Compare\[1\] events: fires sync callbacks via `nrf_802154_sl_timestamper_synchronized`.
+///
+/// # Example
+///
+/// ```no_run
+/// #[interrupt]
+/// fn RTC2() {
+///     nrf_802154::lp_timer_isr();
+/// }
+/// ```
+///
+/// # Correctness
+///
+/// This function must only be called from the correct RTC interrupt handler.
+/// It must be called for every interrupt of that RTC instance (do not filter
+/// events). Failing to do so may result in lost timing events or corrupted
+/// internal driver state.
 pub fn lp_timer_isr() {
     extern "C" {
         fn nrf_802154_sl_timer_handler(now_lpticks: u64);
@@ -572,10 +605,25 @@ static mut ISR_TABLE: [Option<IrqHandler>; MAX_IRQ_COUNT] = [None; MAX_IRQ_COUNT
 ///
 /// This function should be called from the actual interrupt vector handler
 /// to invoke the ISR registered by the C driver via `nrf_802154_irq_init`.
+/// The C driver registers ISRs for RADIO and EGU0 interrupt lines during
+/// initialization.
+///
+/// # Example
+///
+/// ```no_run
+/// #[interrupt]
+/// fn RADIO() {
+///     // IRQ number 1 = RADIO on nRF52
+///     unsafe { nrf_802154::irq_handler(1) };
+/// }
+/// ```
 ///
 /// # Safety
 ///
-/// Must only be called from an interrupt context with the correct `irqn`.
+/// This function accesses a global mutable ISR table (`ISR_TABLE`) without
+/// locking. It is safe to call from interrupt context because
+/// `nrf_802154_irq_init` is only called during driver initialization before
+/// interrupts are enabled, so no concurrent writes can occur.
 pub unsafe fn irq_handler(irqn: u32) {
     let idx = irqn as usize;
     if idx < MAX_IRQ_COUNT {
@@ -593,10 +641,10 @@ extern "C" fn nrf_802154_irq_init(irqn: u32, prio: i32, isr: Option<IrqHandler>)
         let clamped_prio = prio.clamp(0, 255) as u8;
         unsafe {
             ISR_TABLE[idx] = isr;
-            cortex_m::peripheral::NVIC::unmask(IrqNumber(irqn as u16));
+            // Set priority while the interrupt is still masked to avoid a window
+            // where the interrupt could fire at the wrong priority.
             let mut nvic = cortex_m::Peripherals::steal().NVIC;
             cortex_m::peripheral::NVIC::set_priority(&mut nvic, IrqNumber(irqn as u16), clamped_prio);
-            cortex_m::peripheral::NVIC::mask(IrqNumber(irqn as u16));
         }
     }
 }
@@ -664,15 +712,18 @@ extern "C" fn nrf_802154_random_deinit() {}
 
 #[no_mangle]
 extern "C" fn nrf_802154_random_get() -> u32 {
-    let mut x = RANDOM_STATE.load(Ordering::Relaxed);
-    if x == 0 {
-        x = 0x12345678;
-    }
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    RANDOM_STATE.store(x, Ordering::Relaxed);
-    x
+    RANDOM_STATE
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |mut x| {
+            if x == 0 {
+                x = 0x12345678;
+            }
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            Some(x)
+        })
+        // Closure always returns Some, so unwrap is safe.
+        .unwrap()
 }
 
 // =============================================================================
