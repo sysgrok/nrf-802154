@@ -45,17 +45,13 @@ impl PsduMeta {
 impl openthread::Radio for Radio<'_> {
     type Error = Error;
 
-    fn caps(&mut self) -> openthread::Capabilities {
-        openthread::Capabilities::empty() // TODO
-    }
+    const CAPS: openthread::Capabilities = openthread::Capabilities::empty(); // TODO
 
-    fn mac_caps(&mut self) -> openthread::MacCapabilities {
-        openthread::MacCapabilities::TX_ACK
-            | openthread::MacCapabilities::RX_ACK
-            | openthread::MacCapabilities::FILTER_PAN_ID
-            | openthread::MacCapabilities::FILTER_SHORT_ADDR
-            | openthread::MacCapabilities::FILTER_EXT_ADDR
-    }
+    const MAC_CAPS: openthread::MacCapabilities = openthread::MacCapabilities::TX_ACK
+        .union(openthread::MacCapabilities::RX_ACK)
+        .union(openthread::MacCapabilities::FILTER_PAN_ID)
+        .union(openthread::MacCapabilities::FILTER_SHORT_ADDR)
+        .union(openthread::MacCapabilities::FILTER_EXT_ADDR);
 
     async fn set_config(&mut self, config: &openthread::Config) -> Result<(), Self::Error> {
         self.set_channel(config.channel);
@@ -71,6 +67,7 @@ impl openthread::Radio for Radio<'_> {
     async fn transmit(
         &mut self,
         psdu: &[u8],
+        cca: bool,
         mut ack_psdu_buf: Option<&mut [u8]>,
     ) -> Result<Option<openthread::PsduMeta>, Self::Error> {
         if psdu.len() > MAX_PSDU_SIZE + 2
@@ -90,7 +87,7 @@ impl openthread::Radio for Radio<'_> {
         let meta = Radio::transmit(
             self,
             &psdu[..psdu.len() - 2],
-            true,
+            cca,
             ack_psdu_buf.as_mut().map(|ack_psdu_buf| {
                 let len = ack_psdu_buf.len();
                 &mut ack_psdu_buf[..len - 2]
