@@ -381,8 +381,8 @@ fn lp_current_lpticks() -> u64 {
         let cnt = rtc.counter().read().counter() as u64;
         let ovf2 = LP_OVERFLOW_COUNT.load(Ordering::Acquire) as u64;
         if ovf1 == ovf2 {
-            let pending_hw_overflow =
-                rtc.events_ovrflw().read() != 0 && cnt < ((RTC_COUNTER_MAX as u64 + 1) / 2);
+            let half_period = (RTC_COUNTER_MAX as u64).div_ceil(2);
+            let pending_hw_overflow = rtc.events_ovrflw().read() != 0 && cnt < half_period;
             let effective_ovf = if pending_hw_overflow { ovf1 + 1 } else { ovf1 };
             return effective_ovf * (RTC_COUNTER_MAX as u64 + 1) + cnt;
         }
@@ -499,17 +499,9 @@ extern "C" fn nrf_802154_platform_sl_lptimer_disable() {
 }
 
 /// Get the RTC interrupt number for the LP timer instance.
+/// Derived from the type-level LP timer interrupt to avoid hard-coding chip-specific values.
 fn lp_timer_irqn() -> IrqNumber {
-    #[cfg(any(feature = "nrf52832", feature = "nrf52833", feature = "nrf52840"))]
-    {
-        // RTC2 IRQ number = 36 on nRF52832/52833/52840
-        IrqNumber(36)
-    }
-    #[cfg(not(any(feature = "nrf52832", feature = "nrf52833", feature = "nrf52840")))]
-    {
-        // RTC1 IRQ number = 17 on nRF52805-nRF52820, nRF5340-net
-        IrqNumber(17)
-    }
+    IrqNumber(LpTimerIrq::IRQ.number())
 }
 
 #[no_mangle]
