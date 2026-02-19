@@ -1,5 +1,5 @@
 use core::cell::Cell;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use critical_section::Mutex;
 use embassy_nrf::pac;
@@ -155,18 +155,20 @@ extern "C" fn nrf_802154_hp_timer_sync_task_get() -> u32 {
     timer.tasks_capture(1).as_ptr() as u32
 }
 
+/// Whether a sync capture has occurred on CC[1]
+static HP_SYNC_CAPTURED: AtomicBool = AtomicBool::new(false);
+
 #[no_mangle]
 extern "C" fn nrf_802154_hp_timer_sync_prepare() {
-    let timer = hp_timer();
-    // Clear CC[1] so we can detect if a sync capture occurred
-    timer.cc(1).write_value(0);
+    // Mark that no sync capture has occurred yet
+    HP_SYNC_CAPTURED.store(false, Ordering::Release);
 }
 
 #[no_mangle]
 extern "C" fn nrf_802154_hp_timer_sync_time_get(p_timestamp: *mut u32) -> bool {
-    let timer = hp_timer();
-    let val = timer.cc(1).read();
-    if val != 0 {
+    if HP_SYNC_CAPTURED.load(Ordering::Acquire) {
+        let timer = hp_timer();
+        let val = timer.cc(1).read();
         unsafe { p_timestamp.write(val) };
         true
     } else {
@@ -277,15 +279,16 @@ fn lp_timer() -> pac::rtc::Rtc {
 
 /// Reconstruct the full 64-bit lptick value from the 24-bit RTC counter.
 fn lp_current_lpticks() -> u64 {
-    // Read overflow count and counter atomically (as close as possible).
-    // Read counter first, then overflow, then counter again to detect races.
+    // Read counter, then overflow, then counter again to detect races where
+    // the counter wraps but the overflow ISR has not yet updated LP_OVERFLOW_COUNT.
     let rtc = lp_timer();
     loop {
+        let cnt1 = rtc.counter().read().counter() as u64;
         let ovf = LP_OVERFLOW_COUNT.load(Ordering::Acquire) as u64;
-        let cnt = rtc.counter().read().counter() as u64;
-        let ovf2 = LP_OVERFLOW_COUNT.load(Ordering::Acquire) as u64;
-        if ovf == ovf2 {
-            return ovf * (RTC_COUNTER_MAX as u64 + 1) + cnt;
+        let cnt2 = rtc.counter().read().counter() as u64;
+        // If the counter decreased, a wrap occurred during the sequence; retry.
+        if cnt2 >= cnt1 {
+            return ovf * (RTC_COUNTER_MAX as u64 + 1) + cnt2;
         }
     }
 }
@@ -317,6 +320,9 @@ extern "C" fn nrf_802154_platform_sl_lp_timer_deinit() {
         w.set_compare(0, true);
         w.set_compare(1, true);
     });
+    // Also disable compare[2] event routing and clear any pending event
+    rtc.evtenclr().write(|w| w.set_compare(2, true));
+    rtc.events_compare(2).write_value(0);
 }
 
 #[no_mangle]
@@ -327,17 +333,31 @@ extern "C" fn nrf_802154_platform_sl_lptimer_current_lpticks_get() -> u64 {
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_us_to_lpticks_convert(us: u64, round_up: bool) -> u64 {
     // lpticks = us * 32768 / 1000000
-    if round_up {
-        (us * RTC_FREQ_HZ).div_ceil(1000000)
+    // Use u128 intermediate to avoid overflow for large us values.
+    let product = (us as u128) * (RTC_FREQ_HZ as u128);
+    let ticks = if round_up {
+        product.div_ceil(1_000_000u128)
     } else {
-        us * RTC_FREQ_HZ / 1000000
+        product / 1_000_000u128
+    };
+    if ticks > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        ticks as u64
     }
 }
 
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_lpticks_to_us_convert(lpticks: u64) -> u64 {
     // us = lpticks * 1000000 / 32768
-    lpticks * 1000000 / RTC_FREQ_HZ
+    // Use u128 intermediate to avoid overflow for large lptick values.
+    let product = (lpticks as u128) * 1_000_000u128;
+    let us = product / (RTC_FREQ_HZ as u128);
+    if us > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        us as u64
+    }
 }
 
 #[no_mangle]
@@ -359,14 +379,33 @@ extern "C" fn nrf_802154_platform_sl_lptimer_disable() {
     rtc.events_compare(0).write_value(0);
 }
 
+/// Get the RTC interrupt number for the LP timer instance.
+fn lp_timer_irqn() -> IrqNumber {
+    #[cfg(any(feature = "nrf52832", feature = "nrf52833", feature = "nrf52840"))]
+    {
+        // RTC2 IRQ number = 36 on nRF52832/52833/52840
+        IrqNumber(36)
+    }
+    #[cfg(not(any(feature = "nrf52832", feature = "nrf52833", feature = "nrf52840")))]
+    {
+        // RTC1 IRQ number = 17 on nRF52805-nRF52820, nRF5340-net
+        IrqNumber(17)
+    }
+}
+
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_critical_section_enter() {
+    // Mask the RTC interrupt to prevent nrf_802154_sl_timer_handler from being called.
+    cortex_m::peripheral::NVIC::mask(lp_timer_irqn());
     LP_CRIT_SECT_CNT.fetch_add(1, Ordering::AcqRel);
 }
 
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_critical_section_exit() {
-    LP_CRIT_SECT_CNT.fetch_sub(1, Ordering::AcqRel);
+    if LP_CRIT_SECT_CNT.fetch_sub(1, Ordering::AcqRel) == 1 {
+        // Last nesting level — re-enable the RTC interrupt.
+        unsafe { cortex_m::peripheral::NVIC::unmask(lp_timer_irqn()) };
+    }
 }
 
 /// NRF_802154_SL_LPTIMER_PLATFORM_SUCCESS
@@ -466,6 +505,46 @@ extern "C" fn nrf_802154_platform_sl_lptimer_granularity_get() -> u32 {
     (1_000_000u64).div_ceil(RTC_FREQ_HZ) as u32
 }
 
+/// LP Timer (RTC) interrupt handler.
+///
+/// This function must be called from the RTC interrupt handler for the LP timer instance
+/// (RTC2 on nRF52832/52833/52840, RTC1 on other chips). It handles:
+/// - Overflow events: increments the 64-bit lptick overflow counter.
+/// - Compare[0] events: fires scheduled timer callbacks via `nrf_802154_sl_timer_handler`.
+/// - Compare[1] events: fires sync callbacks via `nrf_802154_sl_timestamper_synchronized`.
+pub fn lp_timer_isr() {
+    extern "C" {
+        fn nrf_802154_sl_timer_handler(now_lpticks: u64);
+        fn nrf_802154_sl_timestamper_synchronized();
+    }
+
+    let rtc = lp_timer();
+
+    // Handle overflow: increment the 64-bit lptick counter extension
+    if rtc.events_ovrflw().read() != 0 {
+        rtc.events_ovrflw().write_value(0);
+        LP_OVERFLOW_COUNT.fetch_add(1, Ordering::Release);
+    }
+
+    // Handle compare[0]: scheduled timer fire
+    if rtc.events_compare(0).read() != 0 {
+        rtc.events_compare(0).write_value(0);
+        let now = lp_current_lpticks();
+        let fire = critical_section::with(|cs| LP_FIRE_LPTICKS.borrow(cs).get());
+        if now >= fire {
+            unsafe { nrf_802154_sl_timer_handler(now) };
+        }
+    }
+
+    // Handle compare[1]: sync timer fire
+    if rtc.events_compare(1).read() != 0 {
+        rtc.events_compare(1).write_value(0);
+        // Mark sync capture in HP timer
+        HP_SYNC_CAPTURED.store(true, Ordering::Release);
+        unsafe { nrf_802154_sl_timestamper_synchronized() };
+    }
+}
+
 // =============================================================================
 // IRQ
 //
@@ -489,15 +568,34 @@ type IrqHandler = unsafe extern "C" fn();
 const MAX_IRQ_COUNT: usize = 64;
 static mut ISR_TABLE: [Option<IrqHandler>; MAX_IRQ_COUNT] = [None; MAX_IRQ_COUNT];
 
+/// Dispatches a registered ISR for the given IRQ number.
+///
+/// This function should be called from the actual interrupt vector handler
+/// to invoke the ISR registered by the C driver via `nrf_802154_irq_init`.
+///
+/// # Safety
+///
+/// Must only be called from an interrupt context with the correct `irqn`.
+pub unsafe fn irq_handler(irqn: u32) {
+    let idx = irqn as usize;
+    if idx < MAX_IRQ_COUNT {
+        if let Some(handler) = unsafe { ISR_TABLE[idx] } {
+            unsafe { handler() };
+        }
+    }
+}
+
 #[no_mangle]
 extern "C" fn nrf_802154_irq_init(irqn: u32, prio: i32, isr: Option<IrqHandler>) {
     let idx = irqn as usize;
     if idx < MAX_IRQ_COUNT {
+        // Clamp the requested priority to the valid range [0, 255].
+        let clamped_prio = prio.clamp(0, 255) as u8;
         unsafe {
             ISR_TABLE[idx] = isr;
             cortex_m::peripheral::NVIC::unmask(IrqNumber(irqn as u16));
             let mut nvic = cortex_m::Peripherals::steal().NVIC;
-            cortex_m::peripheral::NVIC::set_priority(&mut nvic, IrqNumber(irqn as u16), prio as u8);
+            cortex_m::peripheral::NVIC::set_priority(&mut nvic, IrqNumber(irqn as u16), clamped_prio);
             cortex_m::peripheral::NVIC::mask(IrqNumber(irqn as u16));
         }
     }
@@ -544,11 +642,18 @@ static RANDOM_STATE: AtomicU32 = AtomicU32::new(0);
 
 #[no_mangle]
 extern "C" fn nrf_802154_random_init() {
-    // Seed from the device FICR DEVICEID registers for uniqueness
-    const FICR_DEVICEID0: *const u32 = 0x1000_0060 as *const u32;
-    const FICR_DEVICEID1: *const u32 = 0x1000_0064 as *const u32;
-    let id0 = unsafe { core::ptr::read_volatile(FICR_DEVICEID0) };
-    let id1 = unsafe { core::ptr::read_volatile(FICR_DEVICEID1) };
+    // Seed from the device FICR DEVICEID registers for uniqueness.
+    // Use the PAC so the correct address is selected for each target (nRF52 vs nRF53).
+    #[cfg(feature = "nrf52")]
+    let (id0, id1) = {
+        let ficr = pac::FICR;
+        (ficr.deviceid(0).read(), ficr.deviceid(1).read())
+    };
+    #[cfg(feature = "nrf53")]
+    let (id0, id1) = {
+        let ficr = pac::FICR;
+        (ficr.info().deviceid(0).read(), ficr.info().deviceid(1).read())
+    };
     let seed = id0 ^ id1;
     // Ensure non-zero seed (xorshift requires non-zero state)
     RANDOM_STATE.store(if seed != 0 { seed } else { 0x12345678 }, Ordering::Release);
