@@ -1,5 +1,7 @@
+use core::cell::Cell;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use critical_section::Mutex;
 use embassy_nrf::pac;
 
 use crate::mpsl;
@@ -242,10 +244,10 @@ static LP_OVERFLOW_COUNT: AtomicU32 = AtomicU32::new(0);
 static LP_CRIT_SECT_CNT: AtomicU32 = AtomicU32::new(0);
 
 /// Scheduled fire time in lpticks (access under critical section)
-static mut LP_FIRE_LPTICKS: u64 = u64::MAX;
+static LP_FIRE_LPTICKS: Mutex<Cell<u64>> = Mutex::new(Cell::new(u64::MAX));
 
 /// Sync fire time in lpticks (access under critical section)
-static mut LP_SYNC_LPTICKS: u64 = u64::MAX;
+static LP_SYNC_LPTICKS: Mutex<Cell<u64>> = Mutex::new(Cell::new(u64::MAX));
 
 /// Whether hw task is prepared
 static LP_HW_TASK_ACTIVE: AtomicU32 = AtomicU32::new(0);
@@ -340,7 +342,7 @@ extern "C" fn nrf_802154_platform_sl_lptimer_lpticks_to_us_convert(lpticks: u64)
 
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_schedule_at(fire_lpticks: u64) {
-    critical_section::with(|_| unsafe { LP_FIRE_LPTICKS = fire_lpticks });
+    critical_section::with(|cs| LP_FIRE_LPTICKS.borrow(cs).set(fire_lpticks));
     let rtc = lp_timer();
     // Set compare[0] to the lower 24 bits of the target
     let cc_val = (fire_lpticks & RTC_COUNTER_MAX as u64) as u32;
@@ -351,7 +353,7 @@ extern "C" fn nrf_802154_platform_sl_lptimer_schedule_at(fire_lpticks: u64) {
 
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_disable() {
-    critical_section::with(|_| unsafe { LP_FIRE_LPTICKS = u64::MAX });
+    critical_section::with(|cs| LP_FIRE_LPTICKS.borrow(cs).set(u64::MAX));
     let rtc = lp_timer();
     rtc.intenclr().write(|w| w.set_compare(0, true));
     rtc.events_compare(0).write_value(0);
@@ -424,12 +426,12 @@ extern "C" fn nrf_802154_platform_sl_lptimer_sync_schedule_now() {
     rtc.events_compare(1).write_value(0);
     rtc.intenset().write(|w| w.set_compare(1, true));
     rtc.evtenset().write(|w| w.set_compare(1, true));
-    critical_section::with(|_| unsafe { LP_SYNC_LPTICKS = lp_current_lpticks() + 2 });
+    critical_section::with(|cs| LP_SYNC_LPTICKS.borrow(cs).set(lp_current_lpticks() + 2));
 }
 
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_sync_schedule_at(fire_lpticks: u64) {
-    critical_section::with(|_| unsafe { LP_SYNC_LPTICKS = fire_lpticks });
+    critical_section::with(|cs| LP_SYNC_LPTICKS.borrow(cs).set(fire_lpticks));
     let rtc = lp_timer();
     let cc_val = (fire_lpticks & RTC_COUNTER_MAX as u64) as u32;
     rtc.cc(1).write(|w| w.set_compare(cc_val));
@@ -440,7 +442,7 @@ extern "C" fn nrf_802154_platform_sl_lptimer_sync_schedule_at(fire_lpticks: u64)
 
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_sync_abort() {
-    critical_section::with(|_| unsafe { LP_SYNC_LPTICKS = u64::MAX });
+    critical_section::with(|cs| LP_SYNC_LPTICKS.borrow(cs).set(u64::MAX));
     let rtc = lp_timer();
     rtc.intenclr().write(|w| w.set_compare(1, true));
     rtc.evtenclr().write(|w| w.set_compare(1, true));
@@ -455,13 +457,13 @@ extern "C" fn nrf_802154_platform_sl_lptimer_sync_event_get() -> u32 {
 
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_sync_lpticks_get() -> u64 {
-    critical_section::with(|_| unsafe { LP_SYNC_LPTICKS })
+    critical_section::with(|cs| LP_SYNC_LPTICKS.borrow(cs).get())
 }
 
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_granularity_get() -> u32 {
-    // One lptick at 32.768 kHz ≈ 30.5 µs. Round up to 31 µs.
-    31
+    // One lptick at 32.768 kHz ≈ 30.5 µs.
+    (1_000_000u64).div_ceil(RTC_FREQ_HZ) as u32
 }
 
 // =============================================================================
@@ -483,8 +485,8 @@ unsafe impl cortex_m::interrupt::InterruptNumber for IrqNumber {
 
 type IrqHandler = unsafe extern "C" fn();
 
-/// ISR callback table (max 48 IRQ lines, covering all nRF52/nRF53 peripherals)
-const MAX_IRQ_COUNT: usize = 48;
+/// ISR callback table (max 64 IRQ lines, covering all nRF52/nRF53 peripherals)
+const MAX_IRQ_COUNT: usize = 64;
 static mut ISR_TABLE: [Option<IrqHandler>; MAX_IRQ_COUNT] = [None; MAX_IRQ_COUNT];
 
 #[no_mangle]
@@ -542,9 +544,11 @@ static RANDOM_STATE: AtomicU32 = AtomicU32::new(0);
 
 #[no_mangle]
 extern "C" fn nrf_802154_random_init() {
-    // Seed from the device FICR DEVICEID register for uniqueness
-    let id0 = unsafe { core::ptr::read_volatile(0x10000060 as *const u32) };
-    let id1 = unsafe { core::ptr::read_volatile(0x10000064 as *const u32) };
+    // Seed from the device FICR DEVICEID registers for uniqueness
+    const FICR_DEVICEID0: *const u32 = 0x1000_0060 as *const u32;
+    const FICR_DEVICEID1: *const u32 = 0x1000_0064 as *const u32;
+    let id0 = unsafe { core::ptr::read_volatile(FICR_DEVICEID0) };
+    let id1 = unsafe { core::ptr::read_volatile(FICR_DEVICEID1) };
     let seed = id0 ^ id1;
     // Ensure non-zero seed (xorshift requires non-zero state)
     RANDOM_STATE.store(if seed != 0 { seed } else { 0x12345678 }, Ordering::Release);
