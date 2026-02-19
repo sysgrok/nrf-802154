@@ -295,13 +295,24 @@ fn lp_timer() -> pac::rtc::Rtc {
 fn lp_current_lpticks() -> u64 {
     // Double-read the overflow counter around the counter read to detect
     // races where an overflow ISR fires between the reads.
+    //
+    // Also account for a pending hardware overflow event (EVENTS_OVRFLW set)
+    // that has not yet been serviced — e.g. because the RTC interrupt is masked
+    // inside lptimer_critical_section_enter. In that case LP_OVERFLOW_COUNT is
+    // stale while the counter has already wrapped, so we add one extra period.
+    // We only treat EVENTS_OVRFLW as pending when the counter is in the low half
+    // of its range (where it will be right after a wrap) to avoid double-counting
+    // if the ISR services the event between reading the flag and the counter.
     let rtc = lp_timer();
     loop {
         let ovf1 = LP_OVERFLOW_COUNT.load(Ordering::Acquire) as u64;
         let cnt = rtc.counter().read().counter() as u64;
         let ovf2 = LP_OVERFLOW_COUNT.load(Ordering::Acquire) as u64;
         if ovf1 == ovf2 {
-            return ovf1 * (RTC_COUNTER_MAX as u64 + 1) + cnt;
+            let pending_hw_overflow =
+                rtc.events_ovrflw().read() != 0 && cnt < ((RTC_COUNTER_MAX as u64 + 1) / 2);
+            let effective_ovf = if pending_hw_overflow { ovf1 + 1 } else { ovf1 };
+            return effective_ovf * (RTC_COUNTER_MAX as u64 + 1) + cnt;
         }
     }
 }
@@ -650,8 +661,9 @@ extern "C" fn nrf_802154_irq_init(irqn: u32, prio: i32, isr: Option<IrqHandler>)
         let clamped_prio = prio.clamp(0, 255) as u8;
         unsafe {
             ISR_TABLE[idx] = isr;
-            // Set priority while the interrupt is still masked to avoid a window
-            // where the interrupt could fire at the wrong priority.
+            // The C driver calls nrf_802154_irq_init during initialization, before
+            // nrf_802154_irq_enable is called, so the interrupt is guaranteed to be
+            // disabled at this point. Setting priority on a disabled interrupt is safe.
             let mut nvic = cortex_m::Peripherals::steal().NVIC;
             cortex_m::peripheral::NVIC::set_priority(&mut nvic, IrqNumber(irqn as u16), clamped_prio);
         }
