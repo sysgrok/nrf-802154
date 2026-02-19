@@ -1,10 +1,82 @@
 use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use cortex_m::interrupt::InterruptNumber as _;
 use critical_section::Mutex;
+use embassy_nrf::interrupt::typelevel::{Handler, Interrupt};
 use embassy_nrf::pac;
 
 use crate::mpsl;
+
+// =============================================================================
+// Interrupt handler type aliases
+//
+// These map chip-specific interrupt vector names to types used by our handler
+// structs and by Radio::new()'s Binding bounds.
+// =============================================================================
+
+// EGU0 interrupt: EGU0_SWI0 on nRF52, EGU0 on nRF5340-net
+#[cfg(feature = "nrf52")]
+pub(crate) type Egu0Irq = embassy_nrf::interrupt::typelevel::EGU0_SWI0;
+#[cfg(feature = "nrf53")]
+pub(crate) type Egu0Irq = embassy_nrf::interrupt::typelevel::EGU0;
+
+// LP timer RTC interrupt: RTC2 on chips with 3 RTCs, RTC1 on others
+#[cfg(any(feature = "nrf52832", feature = "nrf52833", feature = "nrf52840"))]
+pub(crate) type LpTimerIrq = embassy_nrf::interrupt::typelevel::RTC2;
+#[cfg(all(
+    feature = "nrf52",
+    not(any(feature = "nrf52832", feature = "nrf52833", feature = "nrf52840"))
+))]
+pub(crate) type LpTimerIrq = embassy_nrf::interrupt::typelevel::RTC1;
+#[cfg(feature = "nrf53")]
+pub(crate) type LpTimerIrq = embassy_nrf::interrupt::typelevel::RTC1;
+
+// =============================================================================
+// Interrupt handler structs
+//
+// These implement embassy-nrf's Handler trait so that users can wire up
+// interrupts via bind_interrupts! instead of manually writing #[interrupt] fns.
+// =============================================================================
+
+/// Interrupt handler for the LP timer (RTC2 or RTC1 depending on chip).
+///
+/// Bind this to the appropriate RTC interrupt using [`embassy_nrf::bind_interrupts!`]:
+///
+/// ```no_run
+/// # use embassy_nrf::bind_interrupts;
+/// bind_interrupts!(struct Irqs {
+///     RTC2 => nrf_802154::LpTimerInterruptHandler;  // nRF52832/52833/52840
+///     // or: RTC1 => nrf_802154::LpTimerInterruptHandler;  // other chips
+/// });
+/// ```
+pub struct LpTimerInterruptHandler;
+
+impl Handler<LpTimerIrq> for LpTimerInterruptHandler {
+    unsafe fn on_interrupt() {
+        lp_timer_isr();
+    }
+}
+
+/// Interrupt handler for the EGU0 peripheral used by the 802.15.4 C driver.
+///
+/// Bind this to the EGU0/SWI0 interrupt using [`embassy_nrf::bind_interrupts!`]:
+///
+/// ```no_run
+/// # use embassy_nrf::bind_interrupts;
+/// bind_interrupts!(struct Irqs {
+///     EGU0_SWI0 => nrf_802154::Egu0InterruptHandler;  // nRF52
+///     // or: EGU0 => nrf_802154::Egu0InterruptHandler;  // nRF5340-net
+/// });
+/// ```
+pub struct Egu0InterruptHandler;
+
+impl Handler<Egu0Irq> for Egu0InterruptHandler {
+    unsafe fn on_interrupt() {
+        let irqn = Egu0Irq::IRQ.number() as u32;
+        irq_handler(irqn);
+    }
+}
 
 // =============================================================================
 // Temperature
@@ -538,34 +610,11 @@ extern "C" fn nrf_802154_platform_sl_lptimer_granularity_get() -> u32 {
     (1_000_000u64).div_ceil(RTC_FREQ_HZ) as u32
 }
 
-/// LP Timer (RTC) interrupt handler.
+/// LP Timer (RTC) interrupt handler implementation.
 ///
-/// This function must be called from the RTC interrupt handler for the LP timer
-/// instance used by this driver:
-/// - `RTC2` on nRF52832/52833/52840
-/// - `RTC1` on nRF52805–nRF52820 and nRF5340-net
-///
-/// It handles:
-/// - Overflow events: increments the 64-bit lptick overflow counter.
-/// - Compare\[0\] events: fires scheduled timer callbacks via `nrf_802154_sl_timer_handler`.
-/// - Compare\[1\] events: fires sync callbacks via `nrf_802154_sl_timestamper_synchronized`.
-///
-/// # Example
-///
-/// ```no_run
-/// #[interrupt]
-/// fn RTC2() {
-///     nrf_802154::lp_timer_isr();
-/// }
-/// ```
-///
-/// # Correctness
-///
-/// This function must only be called from the correct RTC interrupt handler.
-/// It must be called for every interrupt of that RTC instance (do not filter
-/// events). Failing to do so may result in lost timing events or corrupted
-/// internal driver state.
-pub fn lp_timer_isr() {
+/// Called by `LpTimerInterruptHandler::on_interrupt()` when the RTC interrupt fires.
+/// Handles overflow, compare[0] (timer fire), and compare[1] (sync) events.
+pub(crate) fn lp_timer_isr() {
     extern "C" {
         fn nrf_802154_sl_timer_handler(now_lpticks: u64);
         fn nrf_802154_sl_timestamper_synchronized();
@@ -623,20 +672,8 @@ static mut ISR_TABLE: [Option<IrqHandler>; MAX_IRQ_COUNT] = [None; MAX_IRQ_COUNT
 
 /// Dispatches a registered ISR for the given IRQ number.
 ///
-/// This function should be called from the actual interrupt vector handler
-/// to invoke the ISR registered by the C driver via `nrf_802154_irq_init`.
-/// The C driver registers ISRs for RADIO and EGU0 interrupt lines during
-/// initialization.
-///
-/// # Example
-///
-/// ```no_run
-/// #[interrupt]
-/// fn RADIO() {
-///     // IRQ number 1 = RADIO on nRF52
-///     unsafe { nrf_802154::irq_handler(1) };
-/// }
-/// ```
+/// Called by `Egu0InterruptHandler::on_interrupt()` (and potentially other
+/// handlers) to invoke the ISR registered by the C driver via `nrf_802154_irq_init`.
 ///
 /// # Safety
 ///
@@ -644,7 +681,7 @@ static mut ISR_TABLE: [Option<IrqHandler>; MAX_IRQ_COUNT] = [None; MAX_IRQ_COUNT
 /// locking. It is safe to call from interrupt context because
 /// `nrf_802154_irq_init` is only called during driver initialization before
 /// interrupts are enabled, so no concurrent writes can occur.
-pub unsafe fn irq_handler(irqn: u32) {
+pub(crate) unsafe fn irq_handler(irqn: u32) {
     let idx = irqn as usize;
     if idx < MAX_IRQ_COUNT {
         if let Some(handler) = unsafe { ISR_TABLE[idx] } {

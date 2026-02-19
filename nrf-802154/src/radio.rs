@@ -1,12 +1,14 @@
 use core::cell::RefCell;
 use core::marker::PhantomData;
 
+use embassy_nrf::interrupt::typelevel::Binding;
 use embassy_nrf::radio::Instance;
 use embassy_nrf::Peri;
 use embassy_sync::blocking_mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 
+use crate::platform::{Egu0InterruptHandler, Egu0Irq, LpTimerInterruptHandler, LpTimerIrq};
 use crate::raw;
 
 /// Maximum PSDU size, in bytes, excluding the PHY header (PHR) and the CRC/FCS
@@ -104,12 +106,38 @@ impl<'d> Radio<'d> {
     ///   - On other chips (nRF52805–nRF52820 and nRF5340-net), this driver takes
     ///     ownership of `RTC1`.
     ///
+    /// # Interrupt bindings
+    ///
+    /// The `_irq` parameter proves at compile time that the required interrupts have been
+    /// bound using [`embassy_nrf::bind_interrupts!`]. The following bindings are required:
+    /// - LP timer RTC interrupt → [`LpTimerInterruptHandler`](crate::LpTimerInterruptHandler)
+    /// - EGU0/SWI0 interrupt → [`Egu0InterruptHandler`](crate::Egu0InterruptHandler)
+    ///
     /// **Note:** `RTC1` is typically used by embassy-nrf's time driver. On chips without
     /// `RTC2`, you must ensure that embassy's time driver is configured to use a different
     /// timer or is disabled when this 802.15.4 driver is in use.
-    pub fn new<T: Instance>(
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use embassy_nrf::bind_interrupts;
+    ///
+    /// bind_interrupts!(struct Irqs {
+    ///     // MPSL interrupts
+    ///     SWI0_EGU0 => nrf_mpsl::LowPrioInterruptHandler;
+    ///     RADIO => nrf_mpsl::HighPrioInterruptHandler;
+    ///     TIMER0 => nrf_mpsl::HighPrioInterruptHandler;
+    ///     RTC0 => nrf_mpsl::HighPrioInterruptHandler;
+    ///     POWER_CLOCK => nrf_mpsl::ClockInterruptHandler;
+    ///     // 802.15.4 driver interrupts
+    ///     EGU0_SWI0 => nrf_802154::Egu0InterruptHandler;
+    ///     RTC2 => nrf_802154::LpTimerInterruptHandler;  // or RTC1 on chips without RTC2
+    /// });
+    /// ```
+    pub fn new<T: Instance, I>(
         _radio: Peri<'d, T>,
         _egu: Peri<'d, embassy_nrf::peripherals::EGU0>,
+        _irq: I,
         _mpsl: &'d nrf_mpsl::MultiprotocolServiceLayer<'_>,
         _hp_timer: Peri<'d, embassy_nrf::peripherals::TIMER2>,
         #[cfg(any(feature = "nrf52832", feature = "nrf52833", feature = "nrf52840"))] _lp_timer: Peri<
@@ -120,7 +148,10 @@ impl<'d> Radio<'d> {
             'd,
             embassy_nrf::peripherals::RTC1,
         >,
-    ) -> Self {
+    ) -> Self
+    where
+        I: Binding<LpTimerIrq, LpTimerInterruptHandler> + Binding<Egu0Irq, Egu0InterruptHandler>,
+    {
         unsafe {
             raw::nrf_802154_init();
         }
