@@ -382,6 +382,15 @@ extern "C" fn nrf_802154_platform_sl_lptimer_schedule_at(fire_lpticks: u64) {
     rtc.cc(0).write(|w| w.set_compare(cc_val));
     rtc.events_compare(0).write_value(0);
     rtc.intenset().write(|w| w.set_compare(0, true));
+
+    // Per the C header contract: "If fire_lpticks are in the past, the lptimer
+    // event will be triggered asap, but still from the context of an lptimer's ISR."
+    // Without this check, a past fire time would not trigger the compare event until
+    // the 24-bit counter wraps (~512 seconds). Pending the interrupt ensures the ISR
+    // runs promptly and dispatches via its `now >= fire` check.
+    if fire_lpticks <= lp_current_lpticks() {
+        cortex_m::peripheral::NVIC::pend(lp_timer_irqn());
+    }
 }
 
 #[no_mangle]
@@ -473,7 +482,7 @@ extern "C" fn nrf_802154_platform_sl_lptimer_sync_schedule_now() {
     let rtc = lp_timer();
     let now = rtc.counter().read().counter();
     // Schedule compare[1] to fire at the next tick
-    let cc_val = (now + 2) & RTC_COUNTER_MAX;
+    let cc_val = now.wrapping_add(2) & RTC_COUNTER_MAX;
     rtc.cc(1).write(|w| w.set_compare(cc_val));
     rtc.events_compare(1).write_value(0);
     rtc.intenset().write(|w| w.set_compare(1, true));
