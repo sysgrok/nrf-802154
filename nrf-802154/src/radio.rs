@@ -1,12 +1,14 @@
 use core::cell::RefCell;
 use core::marker::PhantomData;
 
+use embassy_nrf::interrupt::typelevel::Binding;
 use embassy_nrf::radio::Instance;
 use embassy_nrf::Peri;
 use embassy_sync::blocking_mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 
+use crate::platform::{Egu0InterruptHandler, Egu0Irq, LpTimerInterruptHandler, LpTimerIrq};
 use crate::raw;
 
 /// Maximum PSDU size, in bytes, excluding the PHY header (PHR) and the CRC/FCS
@@ -93,11 +95,68 @@ pub struct Radio<'d> {
 
 impl<'d> Radio<'d> {
     /// Create a new IEEE 802.15.4 radio driver.
-    pub fn new<T: Instance>(
+    ///
+    /// # Peripherals
+    ///
+    /// In addition to the RADIO peripheral and the EGU0/MPSL reference, this constructor
+    /// takes ownership of the timer and RTC peripherals used by the 802.15.4 platform layer:
+    /// - `TIMER2` — used as the high-precision (1 µs) timer
+    /// - Low-power RTC used internally by the Nordic 802.15.4 driver:
+    ///   - On nRF52832/52833/52840, this driver takes ownership of `RTC2`.
+    ///   - On other chips (nRF52805–nRF52820 and nRF5340-net), this driver takes
+    ///     ownership of `RTC1`.
+    ///
+    /// # Interrupt bindings
+    ///
+    /// The `_irq` parameter proves at compile time that the required interrupts have been
+    /// bound using [`embassy_nrf::bind_interrupts!`]. The following bindings are required:
+    /// - LP timer RTC interrupt → [`LpTimerInterruptHandler`](crate::LpTimerInterruptHandler)
+    /// - EGU0/SWI0 interrupt → [`Egu0InterruptHandler`](crate::Egu0InterruptHandler)
+    ///
+    /// **Note:** `RTC1` is typically used by embassy-nrf's time driver. On chips without
+    /// `RTC2`, you must ensure that embassy's time driver is configured to use a different
+    /// timer or is disabled when this 802.15.4 driver is in use.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use embassy_nrf::bind_interrupts;
+    ///
+    /// bind_interrupts!(struct Irqs {
+    ///     // MPSL and 802.15.4 share the EGU0/SWI0 interrupt line.
+    ///     // Both handlers are dispatched when this interrupt fires.
+    ///     EGU0_SWI0 => nrf_mpsl::LowPrioInterruptHandler;
+    ///     EGU0_SWI0 => nrf_802154::Egu0InterruptHandler;
+    ///     // On nRF5340-net, use EGU0 instead:
+    ///     // EGU0 => nrf_mpsl::LowPrioInterruptHandler;
+    ///     // EGU0 => nrf_802154::Egu0InterruptHandler;
+    ///     // Other MPSL interrupts
+    ///     RADIO => nrf_mpsl::HighPrioInterruptHandler;
+    ///     TIMER0 => nrf_mpsl::HighPrioInterruptHandler;
+    ///     RTC0 => nrf_mpsl::HighPrioInterruptHandler;
+    ///     POWER_CLOCK => nrf_mpsl::ClockInterruptHandler;
+    ///     // 802.15.4 LP timer
+    ///     RTC2 => nrf_802154::LpTimerInterruptHandler;  // or RTC1 on chips without RTC2
+    /// });
+    /// ```
+    pub fn new<T: Instance, I>(
         _radio: Peri<'d, T>,
         _egu: Peri<'d, embassy_nrf::peripherals::EGU0>,
+        _irq: I,
         _mpsl: &'d nrf_mpsl::MultiprotocolServiceLayer<'_>,
-    ) -> Self {
+        _hp_timer: Peri<'d, embassy_nrf::peripherals::TIMER2>,
+        #[cfg(any(feature = "nrf52832", feature = "nrf52833", feature = "nrf52840"))] _lp_timer: Peri<
+            'd,
+            embassy_nrf::peripherals::RTC2,
+        >,
+        #[cfg(not(any(feature = "nrf52832", feature = "nrf52833", feature = "nrf52840")))] _lp_timer: Peri<
+            'd,
+            embassy_nrf::peripherals::RTC1,
+        >,
+    ) -> Self
+    where
+        I: Binding<LpTimerIrq, LpTimerInterruptHandler> + Binding<Egu0Irq, Egu0InterruptHandler>,
+    {
         unsafe {
             raw::nrf_802154_init();
         }

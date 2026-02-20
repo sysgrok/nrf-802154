@@ -144,3 +144,5 @@ pub(crate) mod fmt;
 mod openthread;
 mod platform;
 mod radio;
+
+pub use platform::{Egu0InterruptHandler, LpTimerInterruptHandler};
