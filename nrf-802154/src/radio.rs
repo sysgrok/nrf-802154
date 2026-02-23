@@ -214,12 +214,11 @@ impl<'d> Radio<'d> {
         unsafe {
             raw::nrf_802154_channel_set(11);
             raw::nrf_802154_tx_power_set(0);
-            raw::nrf_802154_cca_cfg_set(&raw::nrf_802154_cca_cfg_t {
-                mode: raw::NRF_RADIO_CCA_MODE_CARRIER,
-                ed_threshold: 0,
-                corr_threshold: CCA_CORR_THRESHOLD_DEFAULT,
-                corr_limit: CCA_CORR_LIMIT_DEFAULT,
-            });
+            // CCA defaults are set by nrf_802154_pib_init() during nrf_802154_init():
+            //   mode = NRF_RADIO_CCA_MODE_ED (Energy Detection)
+            //   ed_threshold = -75 dBm
+            //   corr_threshold = 0x14, corr_limit = 0x02
+            // Users can override via set_cca() if needed.
         }
 
         Self { _p: PhantomData }
