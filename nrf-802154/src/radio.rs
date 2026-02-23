@@ -622,7 +622,7 @@ unsafe extern "C" fn nrf_802154_transmitted_raw(
         if !p_metadata.data.transmitted.p_ack.is_null() {
             let total = p_metadata.data.transmitted.length as usize;
 
-            if (3..=MAX_PACKET_SIZE).contains(&total) {
+            if (MIN_PHR as usize..=MAX_PACKET_SIZE).contains(&total) {
                 let packet = unsafe { core::slice::from_raw_parts(p_metadata.data.transmitted.p_ack, total) };
 
                 state.rx[..total].copy_from_slice(packet);
