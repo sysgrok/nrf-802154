@@ -276,7 +276,7 @@ impl<'d> Radio<'d> {
     pub fn set_short_addr(&mut self, addr_id: Option<u16>) {
         unsafe {
             if let Some(addr_id) = addr_id {
-                raw::nrf_802154_short_address_set(addr_id.to_be_bytes().as_slice().as_ptr());
+                raw::nrf_802154_short_address_set(addr_id.to_le_bytes().as_slice().as_ptr());
             } else {
                 raw::nrf_802154_short_address_set(core::ptr::null());
             }
@@ -290,7 +290,7 @@ impl<'d> Radio<'d> {
     pub fn set_ext_addr(&mut self, ext_addr_id: Option<u64>) {
         unsafe {
             if let Some(ext_addr_id) = ext_addr_id {
-                raw::nrf_802154_extended_address_set(ext_addr_id.to_be_bytes().as_slice().as_ptr());
+                raw::nrf_802154_extended_address_set(ext_addr_id.to_le_bytes().as_slice().as_ptr());
             } else {
                 raw::nrf_802154_extended_address_set(core::ptr::null());
             }
@@ -321,7 +321,7 @@ impl<'d> Radio<'d> {
 
         let status = RadioState::wait(|state| {
             if let RadioStatus::ReceiveDone(psdu_meta) = state.status {
-                buf.copy_from_slice(&state.rx[1..][..psdu_meta.len as _]);
+                buf[..psdu_meta.len as usize].copy_from_slice(&state.rx[1..][..psdu_meta.len as usize]);
             }
 
             matches!(
@@ -375,7 +375,7 @@ impl<'d> Radio<'d> {
         // TODO: Potential race condition if the radio is scheduled to transmit but not transmitting yet
         let packet_data = RadioState::wait(|state| {
             if !matches!(state.status, RadioStatus::Transmitting) {
-                state.tx[0] = data.len() as u8 + 1 + 2; // + PHR + CRC
+                state.tx[0] = data.len() as u8 + 2; // + CRC/FCS
                 state.tx[1..][..data.len()].copy_from_slice(data);
                 state.tx[1 + data.len()] = 0; // CRC placeholder
                 state.tx[1 + data.len() + 1] = 0; // CRC placeholder
@@ -418,7 +418,7 @@ impl<'d> Radio<'d> {
             if matches!(state.status, RadioStatus::TransmitDone(_)) {
                 if let Some(ack_buf) = ack_buf.as_mut() {
                     if let RadioStatus::TransmitDone(Some(meta)) = state.status {
-                        ack_buf.copy_from_slice(&state.rx[1..][..meta.len as _]);
+                        ack_buf[..meta.len as usize].copy_from_slice(&state.rx[1..][..meta.len as usize]);
                     }
                 }
             }
@@ -459,7 +459,7 @@ impl Drop for Radio<'_> {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 enum RadioStatus {
     Idle,
-    ReceiveFailed(raw::nrf_802154_tx_error_t),
+    ReceiveFailed(raw::nrf_802154_rx_error_t),
     ReceiveDone(PsduMeta),
     CcaFailed(raw::nrf_802154_cca_error_t),
     CcaDone(bool),
@@ -547,17 +547,18 @@ unsafe extern "C" fn nrf_802154_tx_ack_started() {
 }
 
 #[no_mangle]
-unsafe extern "C" fn nrf_802154_received_raw(p_data: *mut u8, power: i8, len: u8) {
+unsafe extern "C" fn nrf_802154_received_raw(p_data: *mut u8, power: i8, lqi: u8) {
     RadioState::update(|state| {
-        state
-            .rx
-            .copy_from_slice(core::slice::from_raw_parts(p_data, len as usize));
+        let phr = unsafe { *p_data };
+        let total = phr as usize + 1;
+
+        state.rx[..total].copy_from_slice(core::slice::from_raw_parts(p_data, total));
 
         state.status = RadioStatus::ReceiveDone(PsduMeta {
-            len: len - 1 - 2, // - PHR - CRC
-            crc: u16::from_le_bytes([state.rx[len as usize - 2], state.rx[len as usize - 1]]),
+            len: phr - 2, // PHR value - FCS
+            crc: u16::from_le_bytes([state.rx[total - 2], state.rx[total - 1]]),
             power,
-            lqi: None,
+            lqi: Some(lqi),
             time: None,
         });
 
@@ -568,17 +569,18 @@ unsafe extern "C" fn nrf_802154_received_raw(p_data: *mut u8, power: i8, len: u8
 }
 
 #[no_mangle]
-unsafe extern "C" fn nrf_802154_received_timestamp_raw(p_data: *mut u8, power: i8, len: u8, time: u64) {
+unsafe extern "C" fn nrf_802154_received_timestamp_raw(p_data: *mut u8, power: i8, lqi: u8, time: u64) {
     RadioState::update(|state| {
-        state
-            .rx
-            .copy_from_slice(core::slice::from_raw_parts(p_data, len as usize));
+        let phr = unsafe { *p_data };
+        let total = phr as usize + 1;
+
+        state.rx[..total].copy_from_slice(core::slice::from_raw_parts(p_data, total));
 
         state.status = RadioStatus::ReceiveDone(PsduMeta {
-            len: len - 1 - 2, // - PHR - CRC
-            crc: u16::from_le_bytes([state.rx[len as usize - 2], state.rx[len as usize - 1]]),
+            len: phr - 2, // PHR value - FCS
+            crc: u16::from_le_bytes([state.rx[total - 2], state.rx[total - 1]]),
             power,
-            lqi: None,
+            lqi: Some(lqi),
             time: Some(time),
         });
 
@@ -601,15 +603,16 @@ unsafe extern "C" fn nrf_802154_transmitted_raw(
     RadioState::update(|state| {
         let p_metadata = unsafe { p_metadata.as_ref().unwrap() };
         if !p_metadata.data.transmitted.p_ack.is_null() {
-            let len = p_metadata.data.transmitted.length;
+            let phr = unsafe { *p_metadata.data.transmitted.p_ack };
+            let total = phr as usize + 1;
 
-            let packet = unsafe { core::slice::from_raw_parts(p_metadata.data.transmitted.p_ack, len as usize) };
+            let packet = unsafe { core::slice::from_raw_parts(p_metadata.data.transmitted.p_ack, total) };
 
-            state.rx.copy_from_slice(packet);
+            state.rx[..total].copy_from_slice(packet);
 
             state.status = RadioStatus::TransmitDone(Some(PsduMeta {
-                len: len - 1 - 2, // - PHR - CRC
-                crc: u16::from_le_bytes([state.rx[len as usize - 2], state.rx[len as usize - 1]]),
+                len: phr - 2, // PHR value - FCS
+                crc: u16::from_le_bytes([state.rx[total - 2], state.rx[total - 1]]),
                 power: p_metadata.data.transmitted.power,
                 lqi: Some(p_metadata.data.transmitted.lqi),
                 time: Some(p_metadata.data.transmitted.time),
