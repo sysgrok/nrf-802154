@@ -423,6 +423,87 @@ impl<'d> Radio<'d> {
             return Err(Error::ScheduleTransmit);
         }
 
+        Self::wait_transmit_done(&mut ack_buf).await
+    }
+
+    /// Transmit one radio packet using the CSMA-CA algorithm.
+    ///
+    /// This performs the full CSMA-CA procedure (random backoff + CCA + retry) before
+    /// transmitting the frame. Use this instead of [`transmit`](Self::transmit) when
+    /// the IEEE 802.15.4 CSMA-CA channel access method is needed.
+    ///
+    /// # Arguments
+    /// - `data`: The PSDU data to transmit; this data should not contain PHY fields like PHR and CRC/FCS.
+    ///   The data must be at most `MAX_PSDU_SIZE` bytes long.
+    /// - `ack_buf`: If the radio is configured to wait for ACK frame in response to its transmission,
+    ///   this buffer will be filled with the PSDU data of the received ACK frame.
+    ///   In either case, `None` can be passed if the user is not interested in the ACK frame.
+    ///
+    /// # Returns
+    /// - `Ok(Some(PsduMeta))` if the packet was successfully transmitted and an ACK was received.
+    /// - `Ok(None)` if the packet was successfully transmitted and no ACK was expected.
+    /// - `Err(Error::ScheduleTransmit)` if the transmission could not be scheduled (radio busy, etc)
+    /// - `Err(Error::Transmit)` if the transmission failed (channel access failure, no ACK, etc)
+    pub async fn transmit_csma_ca(
+        &mut self,
+        data: &[u8],
+        mut ack_buf: Option<&mut [u8]>,
+    ) -> Result<Option<PsduMeta>, Error> {
+        if data.len() > MAX_PSDU_SIZE {
+            return Err(Error::TransmitDataTooLarge);
+        }
+
+        if let Some(ack_buf) = ack_buf.as_ref() {
+            if ack_buf.len() < MAX_PSDU_SIZE {
+                return Err(Error::ReceiveBufTooSmall);
+            }
+        }
+
+        // TODO: Potential race condition if the radio is scheduled to transmit but not transmitting yet
+        let packet_data = RadioState::wait(|state| {
+            if !matches!(state.status, RadioStatus::Transmitting) {
+                state.tx[0] = data.len() as u8 + 2; // + CRC/FCS
+                state.tx[1..][..data.len()].copy_from_slice(data);
+                state.tx[1 + data.len()] = 0; // CRC placeholder
+                state.tx[1 + data.len() + 1] = 0; // CRC placeholder
+
+                let packet_data: &mut [u8] = &mut state.tx;
+
+                Some(packet_data.as_mut_ptr())
+            } else {
+                None
+            }
+        })
+        .await;
+
+        let scheduled = unsafe {
+            raw::nrf_802154_transmit_csma_ca_raw(
+                packet_data,
+                &raw::nrf_802154_transmit_csma_ca_metadata_t {
+                    frame_props: raw::nrf_802154_transmitted_frame_props_t {
+                        is_secured: false,
+                        dynamic_data_is_set: false,
+                    },
+                    tx_power: raw::nrf_802154_tx_power_metadata_t {
+                        use_metadata_value: false,
+                        power: 0,
+                    },
+                    tx_channel: raw::nrf_802154_tx_channel_metadata_t {
+                        use_metadata_value: false,
+                        channel: 0,
+                    },
+                },
+            )
+        };
+
+        if !scheduled {
+            return Err(Error::ScheduleTransmit);
+        }
+
+        Self::wait_transmit_done(&mut ack_buf).await
+    }
+
+    async fn wait_transmit_done(ack_buf: &mut Option<&mut [u8]>) -> Result<Option<PsduMeta>, Error> {
         let status = RadioState::wait(|state| {
             if matches!(state.status, RadioStatus::TransmitDone(_)) {
                 if let Some(ack_buf) = ack_buf.as_mut() {
