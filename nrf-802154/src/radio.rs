@@ -16,6 +16,15 @@ pub const MAX_PSDU_SIZE: usize = MAX_PACKET_SIZE - 2/*CRC*/ - 1/*PHR*/;
 
 const MAX_PACKET_SIZE: usize = 128;
 
+/// Minimum valid PHR value (1 byte PSDU + 2 bytes FCS)
+const MIN_PHR: u8 = 3;
+
+/// Nordic default correlator threshold for CCA carrier-sense modes
+const CCA_CORR_THRESHOLD_DEFAULT: u8 = 0x14;
+
+/// Nordic default correlator limit for CCA carrier-sense modes
+const CCA_CORR_LIMIT_DEFAULT: u8 = 0x02;
+
 /// Radio error
 // TODO: Extend the error codes with additional information
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,8 +180,8 @@ impl<'d> Radio<'d> {
             raw::nrf_802154_cca_cfg_set(&raw::nrf_802154_cca_cfg_t {
                 mode: raw::NRF_RADIO_CCA_MODE_CARRIER,
                 ed_threshold: 0,
-                corr_threshold: 0,
-                corr_limit: 0,
+                corr_threshold: CCA_CORR_THRESHOLD_DEFAULT,
+                corr_limit: CCA_CORR_LIMIT_DEFAULT,
             });
         }
 
@@ -237,8 +246,8 @@ impl<'d> Radio<'d> {
             raw::nrf_802154_cca_cfg_set(&raw::nrf_802154_cca_cfg_t {
                 mode,
                 ed_threshold: ed_threshold as _,
-                corr_threshold: 0,
-                corr_limit: 0,
+                corr_threshold: CCA_CORR_THRESHOLD_DEFAULT,
+                corr_limit: CCA_CORR_LIMIT_DEFAULT,
             });
         }
     }
@@ -552,15 +561,19 @@ unsafe extern "C" fn nrf_802154_received_raw(p_data: *mut u8, power: i8, lqi: u8
         let phr = unsafe { *p_data };
         let total = phr as usize + 1;
 
-        state.rx[..total].copy_from_slice(core::slice::from_raw_parts(p_data, total));
+        if phr >= MIN_PHR && total <= MAX_PACKET_SIZE {
+            state.rx[..total].copy_from_slice(core::slice::from_raw_parts(p_data, total));
 
-        state.status = RadioStatus::ReceiveDone(PsduMeta {
-            len: phr - 2, // PHR value - FCS
-            crc: u16::from_le_bytes([state.rx[total - 2], state.rx[total - 1]]),
-            power,
-            lqi: Some(lqi),
-            time: None,
-        });
+            state.status = RadioStatus::ReceiveDone(PsduMeta {
+                len: phr - 2, // PHR value - FCS
+                crc: u16::from_le_bytes([state.rx[total - 2], state.rx[total - 1]]),
+                power,
+                lqi: Some(lqi),
+                time: None,
+            });
+        } else {
+            state.status = RadioStatus::ReceiveFailed(raw::NRF_802154_RX_ERROR_INVALID_LENGTH as _);
+        }
 
         unsafe {
             raw::nrf_802154_buffer_free_raw(p_data);
@@ -574,15 +587,19 @@ unsafe extern "C" fn nrf_802154_received_timestamp_raw(p_data: *mut u8, power: i
         let phr = unsafe { *p_data };
         let total = phr as usize + 1;
 
-        state.rx[..total].copy_from_slice(core::slice::from_raw_parts(p_data, total));
+        if phr >= MIN_PHR && total <= MAX_PACKET_SIZE {
+            state.rx[..total].copy_from_slice(core::slice::from_raw_parts(p_data, total));
 
-        state.status = RadioStatus::ReceiveDone(PsduMeta {
-            len: phr - 2, // PHR value - FCS
-            crc: u16::from_le_bytes([state.rx[total - 2], state.rx[total - 1]]),
-            power,
-            lqi: Some(lqi),
-            time: Some(time),
-        });
+            state.status = RadioStatus::ReceiveDone(PsduMeta {
+                len: phr - 2, // PHR value - FCS
+                crc: u16::from_le_bytes([state.rx[total - 2], state.rx[total - 1]]),
+                power,
+                lqi: Some(lqi),
+                time: Some(time),
+            });
+        } else {
+            state.status = RadioStatus::ReceiveFailed(raw::NRF_802154_RX_ERROR_INVALID_LENGTH as _);
+        }
 
         unsafe {
             raw::nrf_802154_buffer_free_raw(p_data);
@@ -603,20 +620,25 @@ unsafe extern "C" fn nrf_802154_transmitted_raw(
     RadioState::update(|state| {
         let p_metadata = unsafe { p_metadata.as_ref().unwrap() };
         if !p_metadata.data.transmitted.p_ack.is_null() {
-            let phr = unsafe { *p_metadata.data.transmitted.p_ack };
-            let total = phr as usize + 1;
+            let total = p_metadata.data.transmitted.length as usize;
 
-            let packet = unsafe { core::slice::from_raw_parts(p_metadata.data.transmitted.p_ack, total) };
+            if (3..=MAX_PACKET_SIZE).contains(&total) {
+                let packet = unsafe { core::slice::from_raw_parts(p_metadata.data.transmitted.p_ack, total) };
 
-            state.rx[..total].copy_from_slice(packet);
+                state.rx[..total].copy_from_slice(packet);
 
-            state.status = RadioStatus::TransmitDone(Some(PsduMeta {
-                len: phr - 2, // PHR value - FCS
-                crc: u16::from_le_bytes([state.rx[total - 2], state.rx[total - 1]]),
-                power: p_metadata.data.transmitted.power,
-                lqi: Some(p_metadata.data.transmitted.lqi),
-                time: Some(p_metadata.data.transmitted.time),
-            }));
+                let phr = state.rx[0];
+
+                state.status = RadioStatus::TransmitDone(Some(PsduMeta {
+                    len: phr - 2, // PHR value - FCS
+                    crc: u16::from_le_bytes([state.rx[total - 2], state.rx[total - 1]]),
+                    power: p_metadata.data.transmitted.power,
+                    lqi: Some(p_metadata.data.transmitted.lqi),
+                    time: Some(p_metadata.data.transmitted.time),
+                }));
+            } else {
+                state.status = RadioStatus::TransmitDone(None);
+            }
 
             unsafe {
                 raw::nrf_802154_buffer_free_raw(p_metadata.data.transmitted.p_ack);
