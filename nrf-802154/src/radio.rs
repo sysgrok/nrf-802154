@@ -708,10 +708,8 @@ unsafe extern "C" fn nrf_802154_transmitted_raw(
 
                 state.rx[..total].copy_from_slice(packet);
 
-                let phr = state.rx[0];
-
                 state.status = RadioStatus::TransmitDone(Some(PsduMeta {
-                    len: phr - 2, // PHR value - FCS
+                    len: (total - 1 - 2) as u8, // total - PHR - FCS
                     crc: u16::from_le_bytes([state.rx[total - 2], state.rx[total - 1]]),
                     power: p_metadata.data.transmitted.power,
                     lqi: Some(p_metadata.data.transmitted.lqi),
