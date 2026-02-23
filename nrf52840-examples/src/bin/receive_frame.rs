@@ -9,14 +9,13 @@
 #![no_main]
 
 use defmt::info;
-use defmt_rtt as _;
 use embassy_executor::Spawner;
+use nrf52840_examples::Irqs;
 use nrf_802154::Radio;
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
 use nrf_mpsl::{MultiprotocolServiceLayer, Peripherals as MpslPeripherals};
-use nrf52840_examples::Irqs;
-use panic_probe as _;
 use static_cell::StaticCell;
+use {defmt_rtt as _, panic_probe as _};
 
 const CHANNEL: u8 = 15;
 const PAN_ID: u16 = 0x4242;
@@ -49,7 +48,10 @@ async fn main(spawner: Spawner) {
     radio.set_pan_id(Some(PAN_ID));
     radio.set_short_addr(Some(SHORT_ADDR));
 
-    info!("Start receiving on channel {}, PAN 0x{:04x}, addr 0x{:04x}", CHANNEL, PAN_ID, SHORT_ADDR);
+    info!(
+        "Start receiving on channel {}, PAN 0x{:04x}, addr 0x{:04x}",
+        CHANNEL, PAN_ID, SHORT_ADDR
+    );
 
     let mut buf = [0u8; nrf_802154::MAX_PSDU_SIZE];
     loop {
@@ -57,9 +59,7 @@ async fn main(spawner: Spawner) {
             Ok(meta) => {
                 info!(
                     "Received frame: {} bytes, power {}dBm, LQI {:?}",
-                    meta.len,
-                    meta.power,
-                    meta.lqi
+                    meta.len, meta.power, meta.lqi
                 );
             }
             Err(e) => {

@@ -9,15 +9,14 @@
 #![no_main]
 
 use defmt::info;
-use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
+use nrf52840_examples::{build_data_frame, Irqs};
 use nrf_802154::Radio;
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
 use nrf_mpsl::{MultiprotocolServiceLayer, Peripherals as MpslPeripherals};
-use nrf52840_examples::{build_data_frame, Irqs};
-use panic_probe as _;
 use static_cell::StaticCell;
+use {defmt_rtt as _, panic_probe as _};
 
 const CHANNEL: u8 = 15;
 const PAN_ID: u16 = 0x4242;

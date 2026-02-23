@@ -59,7 +59,7 @@ pub fn build_data_frame(
         | if ack { 0x0020 } else { 0 } // ACK request
         | 0x0040                       // PAN ID Compression
         | 0x0800                       // Dst Addressing Mode: short (bit 11 = 1)
-        | 0x8000;                      // Src Addressing Mode: short (bit 15 = 1)
+        | 0x8000; // Src Addressing Mode: short (bit 15 = 1)
 
     buf[0] = (fcf & 0xFF) as u8;
     buf[1] = (fcf >> 8) as u8;
