@@ -61,7 +61,7 @@ nrf-802154/           ← root workspace
 - **Submodules required to build nrf-802154-sys**: `CMSIS_5`, `nrfx`, `nrfxlib`.
   In this sandbox the submodules are **not populated**, so building `nrf-802154-sys` will fail
   (cmake can't find `nrfxlib/nrf_802154`). This is expected in CI-less sandboxes.
-  Use `--no-build` / `cargo check` for type/syntax checking.
+  Use `cargo check` for type/syntax checking.
 
 - **ARM GCC toolchain** (`arm-none-eabi-gcc`) is required by the cmake build of the C driver.
   It is not available in this sandbox; `cargo check` still works via clang for bindgen.
@@ -71,6 +71,21 @@ nrf-802154/           ← root workspace
   cargo check -p nrf52840-examples --target thumbv7em-none-eabi
   ```
   This will fail at the `nrf-802154-sys` build step without submodules/arm-gcc.
+
+- **⚠️ Do NOT run `cargo build --features nrf52840` at the workspace root.**
+  The root `Cargo.toml` is a *virtual workspace* (no `[package]` section). Running
+  `--features X` here applies `X` to **all** workspace members. `nrf52840-examples`
+  exposes **no features** (the chip feature is baked into its dependency specs), so
+  Cargo errors because it can't find `nrf52840` as a feature of that crate.
+  Correct commands:
+  ```bash
+  # Build just the library:
+  cargo build -p nrf-802154 --features nrf52840
+
+  # Check/build just the examples (features are hardcoded in their Cargo.toml):
+  cargo check -p nrf52840-examples --target thumbv7em-none-eabi
+  cargo build -p nrf52840-examples --target thumbv7em-none-eabi
+  ```
 
 - **Peripheral ownership on nRF52840**:
   - MPSL takes: `RTC0`, `TIMER0`, `TEMP`, `PPI_CH19/30/31`
