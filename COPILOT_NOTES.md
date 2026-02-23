@@ -87,6 +87,19 @@ nrf-802154/           ← root workspace
   the time-driver symbols are duplicated → linker error. Similarly, `panic-probe` must be `"1"` when
   `defmt = "1"` is used (otherwise `defmt v0.3` and `v1` symbols conflict at link time).
 
+- **⚠️ `__embassy_time_queue_item_from_waker` linker error**: `embassy-nrf v0.9` with
+  `time-driver-rtc1` depends on `embassy-time-queue-utils v0.3`. By default this uses the
+  "integrated" queue (`queue_integrated.rs`) which calls
+  `embassy_executor_timer_queue::TimerQueueItem::from_embassy_waker()` → requires the extern
+  symbol `__embassy_time_queue_item_from_waker` to be defined by the executor. This symbol is
+  only defined by `embassy-executor >= 0.8` which has not been published to crates.io. The fix is to
+  enable `embassy-time-queue-utils/generic-queue-64` in the examples crate, which switches to the
+  generic heap-less queue (`queue_generic.rs`) that does NOT call `from_embassy_waker`.
+  In `nrf802154-examples/Cargo.toml`:
+  ```toml
+  embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
+  ```
+
 - **`mpsl_clock_lfclk_cfg_t` fields** (from `mpsl_clock.h`):
   ```rust
   mpsl_clock_lfclk_cfg_t {
