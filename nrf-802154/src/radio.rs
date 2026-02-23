@@ -292,6 +292,17 @@ impl<'d> Radio<'d> {
         }
     }
 
+    /// Enable or disable promiscuous mode
+    ///
+    /// When enabled, the radio will receive all frames regardless of PAN ID, address, or other
+    /// filtering. When disabled (the default), only frames matching the configured PAN ID and
+    /// addresses are received.
+    pub fn set_promiscuous(&mut self, enable: bool) {
+        unsafe {
+            raw::nrf_802154_promiscuous_set(enable);
+        }
+    }
+
     /// Set the extended address of the device
     ///
     /// # Arguments
