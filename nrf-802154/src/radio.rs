@@ -333,6 +333,10 @@ impl<'d> Radio<'d> {
     /// - `Err(Error::EnterReceive)` if the radio could not enter receive mode
     /// - `Err(Error::Receive)` if the reception failed (CRC error, aborted, etc)
     pub async fn receive(&mut self, buf: &mut [u8]) -> Result<PsduMeta, Error> {
+        STATE.lock(|state| {
+            state.borrow_mut().status = RadioStatus::Idle;
+        });
+
         let receive_entered = unsafe { raw::nrf_802154_receive() };
 
         if !receive_entered {
@@ -408,6 +412,10 @@ impl<'d> Radio<'d> {
             }
         })
         .await;
+
+        STATE.lock(|state| {
+            state.borrow_mut().status = RadioStatus::Idle;
+        });
 
         let scheduled = unsafe {
             raw::nrf_802154_transmit_raw(
@@ -486,6 +494,10 @@ impl<'d> Radio<'d> {
             }
         })
         .await;
+
+        STATE.lock(|state| {
+            state.borrow_mut().status = RadioStatus::Idle;
+        });
 
         let scheduled = unsafe {
             raw::nrf_802154_transmit_csma_ca_raw(
