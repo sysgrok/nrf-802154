@@ -56,7 +56,7 @@ async fn main(spawner: Spawner) {
     let mut frame_buf = [0u8; nrf_802154::MAX_PSDU_SIZE];
 
     loop {
-        let frame_len = build_data_frame(
+        if let Some(frame_len) = build_data_frame(
             seq_number,
             PAN_ID,
             DST_SHORT_ADDR,
@@ -64,11 +64,11 @@ async fn main(spawner: Spawner) {
             true, // request ACK
             PAYLOAD,
             &mut frame_buf,
-        );
-
-        match radio.transmit(&frame_buf[..frame_len], true, None).await {
-            Ok(_) => info!("Send frame with sequence number {}", seq_number),
-            Err(e) => info!("Transmit error: {:?}", e),
+        ) {
+            match radio.transmit(&frame_buf[..frame_len], true, None).await {
+                Ok(_) => info!("Send frame with sequence number {}", seq_number),
+                Err(e) => info!("Transmit error: {:?}", e),
+            }
         }
 
         seq_number = seq_number.wrapping_add(1);

@@ -17,6 +17,9 @@ bind_interrupts!(pub struct Irqs {
     RTC2 => nrf_802154::LpTimerInterruptHandler;
 });
 
+/// MAC header size in bytes: FCF (2) + seq (1) + dest PAN (2) + dest addr (2) + src addr (2).
+const MAC_HEADER_LEN: usize = 9;
+
 /// Build an IEEE 802.15.4 Data frame with short addressing and PAN ID compression.
 ///
 /// # Arguments
@@ -26,10 +29,11 @@ bind_interrupts!(pub struct Irqs {
 /// - `src_addr`: Source short address
 /// - `ack`: Whether to request an ACK
 /// - `payload`: Frame payload (MSDU)
-/// - `buf`: Buffer to write the frame into (must be large enough)
+/// - `buf`: Buffer to write the frame into
 ///
 /// # Returns
-/// The length of the frame written to `buf`.
+/// `Some(len)` with the number of bytes written to `buf`, or `None` if the payload
+/// exceeds `MAX_PSDU_SIZE` or the buffer is too small to hold the frame.
 pub fn build_data_frame(
     seq: u8,
     dst_pan: u16,
@@ -38,7 +42,12 @@ pub fn build_data_frame(
     ack: bool,
     payload: &[u8],
     buf: &mut [u8],
-) -> usize {
+) -> Option<usize> {
+    let frame_len = MAC_HEADER_LEN + payload.len();
+    if frame_len > nrf_802154::MAX_PSDU_SIZE || frame_len > buf.len() {
+        return None;
+    }
+
     // Frame Control Field:
     //   bits  0-2 : Frame Type = 001 (Data)
     //   bit     5 : ACK Request
@@ -62,6 +71,6 @@ pub fn build_data_frame(
     // Source PAN ID is omitted due to PAN ID Compression
     buf[7] = (src_addr & 0xFF) as u8;
     buf[8] = (src_addr >> 8) as u8;
-    buf[9..9 + payload.len()].copy_from_slice(payload);
-    9 + payload.len()
+    buf[MAC_HEADER_LEN..frame_len].copy_from_slice(payload);
+    Some(frame_len)
 }
