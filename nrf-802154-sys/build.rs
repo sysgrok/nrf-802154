@@ -153,6 +153,8 @@ fn bindgen(target: &Target) -> bindgen::Builder {
         .clang_arg(format!("-D{}", target.chip))
         .clang_arg("-DCONFIG_MPSL")
         .clang_arg("-DNRF_802154_INTERNAL_SWI_IRQ_HANDLING=0")
+        .clang_arg("-DNRF_802154_REQUEST_IMPL=0")
+        .clang_arg("-DNRF_802154_NOTIFICATION_IMPL=0")
         .clang_arg(&nrf_802154_egu_instance_workaround)
         .clang_args(target.core.map(|x| format!("-D{}", x)))
         .clang_args(target.chip_core.map(|x| format!("-D{}", x)))
@@ -210,7 +212,7 @@ fn build(target: &Target) {
         .define(
             "CMAKE_C_FLAGS",
             format!(
-                "-Werror=implicit-function-declaration -fshort-enums -DCONFIG_MPSL -DNRF_802154_INTERNAL_SWI_IRQ_HANDLING=0 {} {} {}",
+                "-Werror=implicit-function-declaration -fshort-enums -DCONFIG_MPSL -DNRF_802154_INTERNAL_SWI_IRQ_HANDLING=0 -DNRF_802154_REQUEST_IMPL=0 -DNRF_802154_NOTIFICATION_IMPL=0 {} {} {}",
                 nrf_802154_egu_instance_workaround, nrf_target_args, include_paths_args
             ),
         )
