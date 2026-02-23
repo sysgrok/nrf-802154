@@ -30,14 +30,9 @@ path = "src/bin/sniffer.rs"
 nrf-802154 = { path = "../nrf-802154", features = ["nrf52840", "defmt"] }
 nrf-mpsl = { version = "0.3.0", features = ["nrf52840", "critical-section-impl"] }
 
-embassy-executor = { version = "0.7", features = ["arch-cortex-m", "executor-thread"] }
+embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread"] }
 embassy-nrf = { version = "0.9", features = ["nrf52840", "time-driver-rtc1", "unstable-pac", "time"] }
 embassy-time = "0.5"
-# embassy-nrf v0.9 uses embassy-time-queue-utils v0.3 which by default uses the
-# "integrated" queue that requires __embassy_time_queue_item_from_waker — a symbol
-# only defined by embassy-executor >= 0.8 (not yet on crates.io). Enabling the
-# generic queue avoids calling that symbol and is fully compatible with v0.7.
-embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
 
 defmt = "1"
 defmt-rtt = "1"
