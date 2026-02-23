@@ -25,8 +25,45 @@ const CCA_CORR_THRESHOLD_DEFAULT: u8 = 0x14;
 /// Nordic default correlator limit for CCA carrier-sense modes
 const CCA_CORR_LIMIT_DEFAULT: u8 = 0x02;
 
+/// Transmit error reason
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub enum TxError {
+    /// CCA reported busy channel before the transmission
+    BusyChannel,
+    /// Received ACK frame is other than expected
+    InvalidAck,
+    /// No receive buffer is available to receive an ACK
+    NoMem,
+    /// Radio timeslot ended during the transmission procedure
+    TimeslotEnded,
+    /// ACK frame was not received during the timeout period
+    NoAck,
+    /// Procedure was aborted by another operation
+    Aborted,
+    /// Transmission did not start due to a denied timeslot request
+    TimeslotDenied,
+    /// Unknown error code from the C driver
+    Unknown(u8),
+}
+
+impl From<raw::nrf_802154_tx_error_t> for TxError {
+    fn from(e: raw::nrf_802154_tx_error_t) -> Self {
+        match e as u32 {
+            raw::NRF_802154_TX_ERROR_BUSY_CHANNEL => TxError::BusyChannel,
+            raw::NRF_802154_TX_ERROR_INVALID_ACK => TxError::InvalidAck,
+            raw::NRF_802154_TX_ERROR_NO_MEM => TxError::NoMem,
+            raw::NRF_802154_TX_ERROR_TIMESLOT_ENDED => TxError::TimeslotEnded,
+            raw::NRF_802154_TX_ERROR_NO_ACK => TxError::NoAck,
+            raw::NRF_802154_TX_ERROR_ABORTED => TxError::Aborted,
+            raw::NRF_802154_TX_ERROR_TIMESLOT_DENIED => TxError::TimeslotDenied,
+            _ => TxError::Unknown(e),
+        }
+    }
+}
+
 /// Radio error
-// TODO: Extend the error codes with additional information
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
@@ -39,8 +76,8 @@ pub enum Error {
     ScheduleTransmit,
     /// Could not enter receive mode
     EnterReceive,
-    /// Transmission failed (no ACK received, etc)
-    Transmit,
+    /// Transmission failed
+    Transmit(TxError),
     /// Reception failed (CRC error, aborted, etc)
     Receive,
 }
@@ -546,8 +583,10 @@ impl<'d> Radio<'d> {
 
         if let RadioStatus::TransmitDone(psdu_meta) = status {
             Ok(psdu_meta)
+        } else if let RadioStatus::TransmitFailed(code) = status {
+            Err(Error::Transmit(TxError::from(code)))
         } else {
-            Err(Error::Transmit)
+            Err(Error::Transmit(TxError::Unknown(0xFF)))
         }
     }
 }
