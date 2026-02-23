@@ -585,7 +585,7 @@ impl<'d> Radio<'d> {
         } else if let RadioStatus::TransmitFailed(code) = status {
             Err(Error::Transmit(TxError::from(code)))
         } else {
-            Err(Error::Transmit(TxError::Unknown(0xFF)))
+            unreachable!("RadioState::wait must return TransmitDone or TransmitFailed");
         }
     }
 }

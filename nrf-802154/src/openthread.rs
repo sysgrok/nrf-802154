@@ -4,7 +4,7 @@ impl openthread::RadioError for Error {
     fn kind(&self) -> openthread::RadioErrorKind {
         match self {
             Error::TransmitDataTooLarge | Error::ReceiveBufTooSmall => openthread::RadioErrorKind::Other,
-            Error::ScheduleTransmit | Error::Transmit => openthread::RadioErrorKind::TxFailed,
+            Error::ScheduleTransmit | Error::Transmit(_) => openthread::RadioErrorKind::TxFailed,
             Error::EnterReceive | Error::Receive => openthread::RadioErrorKind::RxFailed,
         }
     }
