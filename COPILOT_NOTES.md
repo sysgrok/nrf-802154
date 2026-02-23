@@ -87,6 +87,18 @@ nrf-802154/           ← root workspace
   cargo build -p nrf52840-examples --target thumbv7em-none-eabi
   ```
 
+- **`mpsl_clock_lfclk_cfg_t` fields** (from `mpsl_clock.h`):
+  ```rust
+  mpsl_clock_lfclk_cfg_t {
+      source: nrf_mpsl::raw::MPSL_CLOCK_LF_SRC_RC as u8,
+      rc_ctiv: nrf_mpsl::raw::MPSL_RECOMMENDED_RC_CTIV as u8,       // 16
+      rc_temp_ctiv: nrf_mpsl::raw::MPSL_RECOMMENDED_RC_TEMP_CTIV as u8, // 2
+      accuracy_ppm: nrf_mpsl::raw::MPSL_WORST_CLOCK_ACCURACY_PPM as u16, // 500
+      skip_wait_lfclk_started: false,
+  }
+  ```
+  The constant is `MPSL_WORST_CLOCK_ACCURACY_PPM` (not `MPSL_CLOCK_LF_ACCURACY_500_PPM`).
+
 - **Peripheral ownership on nRF52840**:
   - MPSL takes: `RTC0`, `TIMER0`, `TEMP`, `PPI_CH19/30/31`
   - 802.15.4 driver takes: `RADIO`, `EGU0`, `TIMER2` (HP timer), `RTC2` (LP timer)

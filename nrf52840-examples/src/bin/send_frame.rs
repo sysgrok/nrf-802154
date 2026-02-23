@@ -37,9 +37,10 @@ async fn main(spawner: Spawner) {
 
     let lfclk_cfg = mpsl_clock_lfclk_cfg_t {
         source: nrf_mpsl::raw::MPSL_CLOCK_LF_SRC_RC as u8,
-        rc_ctiv: 16,
-        rc_temp_ctiv: 2,
-        accuracy_ppm: nrf_mpsl::raw::MPSL_CLOCK_LF_ACCURACY_500_PPM as u16,
+        rc_ctiv: nrf_mpsl::raw::MPSL_RECOMMENDED_RC_CTIV as u8,
+        rc_temp_ctiv: nrf_mpsl::raw::MPSL_RECOMMENDED_RC_TEMP_CTIV as u8,
+        accuracy_ppm: nrf_mpsl::raw::MPSL_WORST_CLOCK_ACCURACY_PPM as u16,
+        skip_wait_lfclk_started: false,
     };
 
     let mpsl_p = MpslPeripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
