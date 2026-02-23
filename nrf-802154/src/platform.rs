@@ -699,6 +699,10 @@ unsafe impl cortex_m::interrupt::InterruptNumber for IrqNumber {
 
 type IrqHandler = unsafe extern "C" fn();
 
+/// Number of NVIC priority bits implemented by the hardware.
+/// All supported nRF52/nRF53/nRF54 chips use 3 priority bits, giving 8 priority levels (0-7).
+const NVIC_PRIO_BITS: u8 = 3;
+
 /// ISR callback table (max 64 IRQ lines, covering all nRF52/nRF53 peripherals)
 const MAX_IRQ_COUNT: usize = 64;
 static mut ISR_TABLE: [Option<IrqHandler>; MAX_IRQ_COUNT] = [None; MAX_IRQ_COUNT];
@@ -727,8 +731,12 @@ pub(crate) unsafe fn irq_handler(irqn: u32) {
 extern "C" fn nrf_802154_irq_init(irqn: u32, prio: i32, isr: Option<IrqHandler>) {
     let idx = irqn as usize;
     if idx < MAX_IRQ_COUNT {
-        // Clamp the requested priority to the valid range [0, 255].
-        let clamped_prio = prio.clamp(0, 255) as u8;
+        // The C driver passes CMSIS-style logical priorities (0-7 on nRF52/nRF53).
+        // cortex_m::NVIC::set_priority expects the raw NVIC register value, where
+        // only the top NVIC_PRIO_BITS bits are significant. Convert by shifting
+        // left by (8 - NVIC_PRIO_BITS). All supported nRF chips use 3 priority bits.
+        let clamped_prio = prio.clamp(0, 7) as u8;
+        let raw_prio = clamped_prio << (8 - NVIC_PRIO_BITS);
         unsafe {
             ISR_TABLE[idx] = isr;
             // The C driver calls nrf_802154_irq_init during initialization, before
@@ -741,7 +749,7 @@ extern "C" fn nrf_802154_irq_init(irqn: u32, prio: i32, isr: Option<IrqHandler>)
             // 2. We only access NVIC to set a priority on a disabled interrupt
             // 3. No concurrent NVIC access is possible at this point
             let mut nvic = cortex_m::Peripherals::steal().NVIC;
-            cortex_m::peripheral::NVIC::set_priority(&mut nvic, IrqNumber(irqn as u16), clamped_prio);
+            cortex_m::peripheral::NVIC::set_priority(&mut nvic, IrqNumber(irqn as u16), raw_prio);
         }
     }
 }
@@ -773,7 +781,11 @@ extern "C" fn nrf_802154_irq_is_enabled(irqn: u32) -> bool {
 
 #[no_mangle]
 extern "C" fn nrf_802154_irq_priority_get(irqn: u32) -> u32 {
-    cortex_m::peripheral::NVIC::get_priority(IrqNumber(irqn as u16)) as u32
+    // The C driver compares this value with NVIC_GetPriority() which returns
+    // the logical priority (raw register value >> (8 - __NVIC_PRIO_BITS)).
+    // cortex_m::NVIC::get_priority returns the raw register value, so shift
+    // it to match CMSIS convention.
+    (cortex_m::peripheral::NVIC::get_priority(IrqNumber(irqn as u16)) >> (8 - NVIC_PRIO_BITS)) as u32
 }
 
 // =============================================================================
