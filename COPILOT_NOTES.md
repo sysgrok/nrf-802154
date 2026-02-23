@@ -59,18 +59,14 @@ nrf-802154/           ← root workspace
 ## Build Notes
 
 - **Submodules required to build nrf-802154-sys**: `CMSIS_5`, `nrfx`, `nrfxlib`.
-  In this sandbox the submodules are **not populated**, so building `nrf-802154-sys` will fail
-  (cmake can't find `nrfxlib/nrf_802154`). This is expected in CI-less sandboxes.
-  Use `cargo check` for type/syntax checking.
+  In this sandbox the submodules are **not populated**, so building `nrf-802154-sys` will fail.
+  In CI (GitHub Actions), `submodules: true` is set and the build uses `clang` as the cross-compiler
+  (not `arm-none-eabi-gcc`). The warning about missing `arm-none-eabi-gcc` is harmless.
 
-- **ARM GCC toolchain** (`arm-none-eabi-gcc`) is required by the cmake build of the C driver.
-  It is not available in this sandbox; `cargo check` still works via clang for bindgen.
-
-- **`cargo check` for the examples crate** (type-check only, no link):
+- **Build command for the examples crate**:
   ```bash
-  cargo check -p nrf802154-examples --target thumbv7em-none-eabi
+  cargo build -p nrf802154-examples --target thumbv7em-none-eabi
   ```
-  This will fail at the `nrf-802154-sys` build step without submodules/arm-gcc.
 
 - **⚠️ Do NOT run `cargo build --features nrf52840` at the workspace root.**
   The root `Cargo.toml` is a *virtual workspace* (no `[package]` section). Running
@@ -82,10 +78,14 @@ nrf-802154/           ← root workspace
   # Build just the library:
   cargo build -p nrf-802154 --features nrf52840
 
-  # Check/build just the examples (features are hardcoded in their Cargo.toml):
-  cargo check -p nrf802154-examples --target thumbv7em-none-eabi
+  # Build just the examples (features are hardcoded in their Cargo.toml):
   cargo build -p nrf802154-examples --target thumbv7em-none-eabi
   ```
+
+- **⚠️ Dependency version alignment**: `embassy-time` must match the version used by `embassy-nrf`.
+  `embassy-nrf v0.9` uses `embassy-time v0.5`; if the examples ask for `v0.4`, both get linked and
+  the time-driver symbols are duplicated → linker error. Similarly, `panic-probe` must be `"1"` when
+  `defmt = "1"` is used (otherwise `defmt v0.3` and `v1` symbols conflict at link time).
 
 - **`mpsl_clock_lfclk_cfg_t` fields** (from `mpsl_clock.h`):
   ```rust

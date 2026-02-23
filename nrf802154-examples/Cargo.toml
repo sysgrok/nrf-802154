@@ -32,12 +32,12 @@ nrf-mpsl = { version = "0.3.0", features = ["nrf52840", "critical-section-impl"]
 
 embassy-executor = { version = "0.7", features = ["arch-cortex-m", "executor-thread"] }
 embassy-nrf = { version = "0.9", features = ["nrf52840", "time-driver-rtc1", "unstable-pac"] }
-embassy-time = "0.4"
+embassy-time = "0.5"
 
 defmt = "1"
 defmt-rtt = "1"
 
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
-panic-probe = { version = "0.3", features = ["print-defmt"] }
+panic-probe = { version = "1", features = ["print-defmt"] }
 static_cell = "2"
