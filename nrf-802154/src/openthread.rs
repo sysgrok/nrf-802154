@@ -45,7 +45,8 @@ impl PsduMeta {
 impl openthread::Radio for Radio<'_> {
     type Error = Error;
 
-    const CAPS: openthread::Capabilities = openthread::Capabilities::empty(); // TODO
+    const CAPS: openthread::Capabilities =
+        openthread::Capabilities::ACK_TIMEOUT.union(openthread::Capabilities::CSMA_BACKOFF);
 
     const MAC_CAPS: openthread::MacCapabilities = openthread::MacCapabilities::TX_ACK
         .union(openthread::MacCapabilities::RX_ACK)
@@ -84,16 +85,28 @@ impl openthread::Radio for Radio<'_> {
             }
         }
 
-        let meta = Radio::transmit(
-            self,
-            &psdu[..psdu.len() - 2],
-            cca,
-            ack_psdu_buf.as_mut().map(|ack_psdu_buf| {
-                let len = ack_psdu_buf.len();
-                &mut ack_psdu_buf[..len - 2]
-            }),
-        )
-        .await?;
+        let meta = if cca {
+            Radio::transmit_csma_ca(
+                self,
+                &psdu[..psdu.len() - 2],
+                ack_psdu_buf.as_mut().map(|ack_psdu_buf| {
+                    let len = ack_psdu_buf.len();
+                    &mut ack_psdu_buf[..len - 2]
+                }),
+            )
+            .await?
+        } else {
+            Radio::transmit(
+                self,
+                &psdu[..psdu.len() - 2],
+                false,
+                ack_psdu_buf.as_mut().map(|ack_psdu_buf| {
+                    let len = ack_psdu_buf.len();
+                    &mut ack_psdu_buf[..len - 2]
+                }),
+            )
+            .await?
+        };
 
         Ok(if let Some(meta) = meta {
             if let Some(ack_psdu_buf) = ack_psdu_buf {

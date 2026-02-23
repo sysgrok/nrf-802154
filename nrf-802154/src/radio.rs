@@ -16,6 +16,15 @@ pub const MAX_PSDU_SIZE: usize = MAX_PACKET_SIZE - 2/*CRC*/ - 1/*PHR*/;
 
 const MAX_PACKET_SIZE: usize = 128;
 
+/// Minimum valid PHR value (1 byte PSDU + 2 bytes FCS)
+const MIN_PHR: u8 = 3;
+
+/// Nordic default correlator threshold for CCA carrier-sense modes
+const CCA_CORR_THRESHOLD_DEFAULT: u8 = 0x14;
+
+/// Nordic default correlator limit for CCA carrier-sense modes
+const CCA_CORR_LIMIT_DEFAULT: u8 = 0x02;
+
 /// Radio error
 // TODO: Extend the error codes with additional information
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,8 +180,8 @@ impl<'d> Radio<'d> {
             raw::nrf_802154_cca_cfg_set(&raw::nrf_802154_cca_cfg_t {
                 mode: raw::NRF_RADIO_CCA_MODE_CARRIER,
                 ed_threshold: 0,
-                corr_threshold: 0,
-                corr_limit: 0,
+                corr_threshold: CCA_CORR_THRESHOLD_DEFAULT,
+                corr_limit: CCA_CORR_LIMIT_DEFAULT,
             });
         }
 
@@ -237,8 +246,8 @@ impl<'d> Radio<'d> {
             raw::nrf_802154_cca_cfg_set(&raw::nrf_802154_cca_cfg_t {
                 mode,
                 ed_threshold: ed_threshold as _,
-                corr_threshold: 0,
-                corr_limit: 0,
+                corr_threshold: CCA_CORR_THRESHOLD_DEFAULT,
+                corr_limit: CCA_CORR_LIMIT_DEFAULT,
             });
         }
     }
@@ -276,7 +285,7 @@ impl<'d> Radio<'d> {
     pub fn set_short_addr(&mut self, addr_id: Option<u16>) {
         unsafe {
             if let Some(addr_id) = addr_id {
-                raw::nrf_802154_short_address_set(addr_id.to_be_bytes().as_slice().as_ptr());
+                raw::nrf_802154_short_address_set(addr_id.to_le_bytes().as_slice().as_ptr());
             } else {
                 raw::nrf_802154_short_address_set(core::ptr::null());
             }
@@ -290,7 +299,7 @@ impl<'d> Radio<'d> {
     pub fn set_ext_addr(&mut self, ext_addr_id: Option<u64>) {
         unsafe {
             if let Some(ext_addr_id) = ext_addr_id {
-                raw::nrf_802154_extended_address_set(ext_addr_id.to_be_bytes().as_slice().as_ptr());
+                raw::nrf_802154_extended_address_set(ext_addr_id.to_le_bytes().as_slice().as_ptr());
             } else {
                 raw::nrf_802154_extended_address_set(core::ptr::null());
             }
@@ -321,7 +330,7 @@ impl<'d> Radio<'d> {
 
         let status = RadioState::wait(|state| {
             if let RadioStatus::ReceiveDone(psdu_meta) = state.status {
-                buf.copy_from_slice(&state.rx[1..][..psdu_meta.len as _]);
+                buf[..psdu_meta.len as usize].copy_from_slice(&state.rx[1..][..psdu_meta.len as usize]);
             }
 
             matches!(
@@ -375,7 +384,7 @@ impl<'d> Radio<'d> {
         // TODO: Potential race condition if the radio is scheduled to transmit but not transmitting yet
         let packet_data = RadioState::wait(|state| {
             if !matches!(state.status, RadioStatus::Transmitting) {
-                state.tx[0] = data.len() as u8 + 1 + 2; // + PHR + CRC
+                state.tx[0] = data.len() as u8 + 2; // + CRC/FCS
                 state.tx[1..][..data.len()].copy_from_slice(data);
                 state.tx[1 + data.len()] = 0; // CRC placeholder
                 state.tx[1 + data.len() + 1] = 0; // CRC placeholder
@@ -414,11 +423,92 @@ impl<'d> Radio<'d> {
             return Err(Error::ScheduleTransmit);
         }
 
+        Self::wait_transmit_done(&mut ack_buf).await
+    }
+
+    /// Transmit one radio packet using the CSMA-CA algorithm.
+    ///
+    /// This performs the full CSMA-CA procedure (random backoff + CCA + retry) before
+    /// transmitting the frame. Use this instead of [`transmit`](Self::transmit) when
+    /// the IEEE 802.15.4 CSMA-CA channel access method is needed.
+    ///
+    /// # Arguments
+    /// - `data`: The PSDU data to transmit; this data should not contain PHY fields like PHR and CRC/FCS.
+    ///   The data must be at most `MAX_PSDU_SIZE` bytes long.
+    /// - `ack_buf`: If the radio is configured to wait for ACK frame in response to its transmission,
+    ///   this buffer will be filled with the PSDU data of the received ACK frame.
+    ///   In either case, `None` can be passed if the user is not interested in the ACK frame.
+    ///
+    /// # Returns
+    /// - `Ok(Some(PsduMeta))` if the packet was successfully transmitted and an ACK was received.
+    /// - `Ok(None)` if the packet was successfully transmitted and no ACK was expected.
+    /// - `Err(Error::ScheduleTransmit)` if the transmission could not be scheduled (radio busy, etc)
+    /// - `Err(Error::Transmit)` if the transmission failed (channel access failure, no ACK, etc)
+    pub async fn transmit_csma_ca(
+        &mut self,
+        data: &[u8],
+        mut ack_buf: Option<&mut [u8]>,
+    ) -> Result<Option<PsduMeta>, Error> {
+        if data.len() > MAX_PSDU_SIZE {
+            return Err(Error::TransmitDataTooLarge);
+        }
+
+        if let Some(ack_buf) = ack_buf.as_ref() {
+            if ack_buf.len() < MAX_PSDU_SIZE {
+                return Err(Error::ReceiveBufTooSmall);
+            }
+        }
+
+        // TODO: Potential race condition if the radio is scheduled to transmit but not transmitting yet
+        let packet_data = RadioState::wait(|state| {
+            if !matches!(state.status, RadioStatus::Transmitting) {
+                state.tx[0] = data.len() as u8 + 2; // + CRC/FCS
+                state.tx[1..][..data.len()].copy_from_slice(data);
+                state.tx[1 + data.len()] = 0; // CRC placeholder
+                state.tx[1 + data.len() + 1] = 0; // CRC placeholder
+
+                let packet_data: &mut [u8] = &mut state.tx;
+
+                Some(packet_data.as_mut_ptr())
+            } else {
+                None
+            }
+        })
+        .await;
+
+        let scheduled = unsafe {
+            raw::nrf_802154_transmit_csma_ca_raw(
+                packet_data,
+                &raw::nrf_802154_transmit_csma_ca_metadata_t {
+                    frame_props: raw::nrf_802154_transmitted_frame_props_t {
+                        is_secured: false,
+                        dynamic_data_is_set: false,
+                    },
+                    tx_power: raw::nrf_802154_tx_power_metadata_t {
+                        use_metadata_value: false,
+                        power: 0,
+                    },
+                    tx_channel: raw::nrf_802154_tx_channel_metadata_t {
+                        use_metadata_value: false,
+                        channel: 0,
+                    },
+                },
+            )
+        };
+
+        if !scheduled {
+            return Err(Error::ScheduleTransmit);
+        }
+
+        Self::wait_transmit_done(&mut ack_buf).await
+    }
+
+    async fn wait_transmit_done(ack_buf: &mut Option<&mut [u8]>) -> Result<Option<PsduMeta>, Error> {
         let status = RadioState::wait(|state| {
             if matches!(state.status, RadioStatus::TransmitDone(_)) {
                 if let Some(ack_buf) = ack_buf.as_mut() {
                     if let RadioStatus::TransmitDone(Some(meta)) = state.status {
-                        ack_buf.copy_from_slice(&state.rx[1..][..meta.len as _]);
+                        ack_buf[..meta.len as usize].copy_from_slice(&state.rx[1..][..meta.len as usize]);
                     }
                 }
             }
@@ -459,7 +549,7 @@ impl Drop for Radio<'_> {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 enum RadioStatus {
     Idle,
-    ReceiveFailed(raw::nrf_802154_tx_error_t),
+    ReceiveFailed(raw::nrf_802154_rx_error_t),
     ReceiveDone(PsduMeta),
     CcaFailed(raw::nrf_802154_cca_error_t),
     CcaDone(bool),
@@ -547,19 +637,24 @@ unsafe extern "C" fn nrf_802154_tx_ack_started() {
 }
 
 #[no_mangle]
-unsafe extern "C" fn nrf_802154_received_raw(p_data: *mut u8, power: i8, len: u8) {
+unsafe extern "C" fn nrf_802154_received_raw(p_data: *mut u8, power: i8, lqi: u8) {
     RadioState::update(|state| {
-        state
-            .rx
-            .copy_from_slice(core::slice::from_raw_parts(p_data, len as usize));
+        let phr = unsafe { *p_data };
+        let total = phr as usize + 1;
 
-        state.status = RadioStatus::ReceiveDone(PsduMeta {
-            len: len - 1 - 2, // - PHR - CRC
-            crc: u16::from_le_bytes([state.rx[len as usize - 2], state.rx[len as usize - 1]]),
-            power,
-            lqi: None,
-            time: None,
-        });
+        if phr >= MIN_PHR && total <= MAX_PACKET_SIZE {
+            state.rx[..total].copy_from_slice(core::slice::from_raw_parts(p_data, total));
+
+            state.status = RadioStatus::ReceiveDone(PsduMeta {
+                len: phr - 2, // PHR value - FCS
+                crc: u16::from_le_bytes([state.rx[total - 2], state.rx[total - 1]]),
+                power,
+                lqi: Some(lqi),
+                time: None,
+            });
+        } else {
+            state.status = RadioStatus::ReceiveFailed(raw::NRF_802154_RX_ERROR_INVALID_LENGTH as _);
+        }
 
         unsafe {
             raw::nrf_802154_buffer_free_raw(p_data);
@@ -568,19 +663,24 @@ unsafe extern "C" fn nrf_802154_received_raw(p_data: *mut u8, power: i8, len: u8
 }
 
 #[no_mangle]
-unsafe extern "C" fn nrf_802154_received_timestamp_raw(p_data: *mut u8, power: i8, len: u8, time: u64) {
+unsafe extern "C" fn nrf_802154_received_timestamp_raw(p_data: *mut u8, power: i8, lqi: u8, time: u64) {
     RadioState::update(|state| {
-        state
-            .rx
-            .copy_from_slice(core::slice::from_raw_parts(p_data, len as usize));
+        let phr = unsafe { *p_data };
+        let total = phr as usize + 1;
 
-        state.status = RadioStatus::ReceiveDone(PsduMeta {
-            len: len - 1 - 2, // - PHR - CRC
-            crc: u16::from_le_bytes([state.rx[len as usize - 2], state.rx[len as usize - 1]]),
-            power,
-            lqi: None,
-            time: Some(time),
-        });
+        if phr >= MIN_PHR && total <= MAX_PACKET_SIZE {
+            state.rx[..total].copy_from_slice(core::slice::from_raw_parts(p_data, total));
+
+            state.status = RadioStatus::ReceiveDone(PsduMeta {
+                len: phr - 2, // PHR value - FCS
+                crc: u16::from_le_bytes([state.rx[total - 2], state.rx[total - 1]]),
+                power,
+                lqi: Some(lqi),
+                time: Some(time),
+            });
+        } else {
+            state.status = RadioStatus::ReceiveFailed(raw::NRF_802154_RX_ERROR_INVALID_LENGTH as _);
+        }
 
         unsafe {
             raw::nrf_802154_buffer_free_raw(p_data);
@@ -601,19 +701,23 @@ unsafe extern "C" fn nrf_802154_transmitted_raw(
     RadioState::update(|state| {
         let p_metadata = unsafe { p_metadata.as_ref().unwrap() };
         if !p_metadata.data.transmitted.p_ack.is_null() {
-            let len = p_metadata.data.transmitted.length;
+            let total = p_metadata.data.transmitted.length as usize;
 
-            let packet = unsafe { core::slice::from_raw_parts(p_metadata.data.transmitted.p_ack, len as usize) };
+            if (MIN_PHR as usize..=MAX_PACKET_SIZE).contains(&total) {
+                let packet = unsafe { core::slice::from_raw_parts(p_metadata.data.transmitted.p_ack, total) };
 
-            state.rx.copy_from_slice(packet);
+                state.rx[..total].copy_from_slice(packet);
 
-            state.status = RadioStatus::TransmitDone(Some(PsduMeta {
-                len: len - 1 - 2, // - PHR - CRC
-                crc: u16::from_le_bytes([state.rx[len as usize - 2], state.rx[len as usize - 1]]),
-                power: p_metadata.data.transmitted.power,
-                lqi: Some(p_metadata.data.transmitted.lqi),
-                time: Some(p_metadata.data.transmitted.time),
-            }));
+                state.status = RadioStatus::TransmitDone(Some(PsduMeta {
+                    len: (total - 1 - 2) as u8, // total - PHR - FCS
+                    crc: u16::from_le_bytes([state.rx[total - 2], state.rx[total - 1]]),
+                    power: p_metadata.data.transmitted.power,
+                    lqi: Some(p_metadata.data.transmitted.lqi),
+                    time: Some(p_metadata.data.transmitted.time),
+                }));
+            } else {
+                state.status = RadioStatus::TransmitDone(None);
+            }
 
             unsafe {
                 raw::nrf_802154_buffer_free_raw(p_metadata.data.transmitted.p_ack);
