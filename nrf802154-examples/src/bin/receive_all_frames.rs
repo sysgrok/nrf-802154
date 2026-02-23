@@ -1,16 +1,14 @@
-//! IEEE 802.15.4 packet sniffer.
+//! Receive all IEEE 802.15.4 frames (promiscuous mode).
 //!
-//! This example captures all IEEE 802.15.4 frames on a given channel (default: 15)
-//! and prints the raw frame bytes via defmt/RTT. Run with a RTT viewer to see the output.
-//!
-//! Similar to `receive_all_frames` but outputs raw frame bytes suited for analysis.
+//! This example listens on channel 15 for all frames regardless of addressing,
+//! and prints metadata about each received frame.
 
 #![no_std]
 #![no_main]
 
 use defmt::info;
 use embassy_executor::Spawner;
-use nrf52840_examples::Irqs;
+use nrf802154_examples::Irqs;
 use nrf_802154::Radio;
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
 use nrf_mpsl::{MultiprotocolServiceLayer, Peripherals as MpslPeripherals};
@@ -46,13 +44,16 @@ async fn main(spawner: Spawner) {
     radio.set_channel(CHANNEL);
     radio.set_promiscuous(true);
 
-    info!("Sniffer started on channel {}", CHANNEL);
+    info!("Start receiving all frames on channel {}", CHANNEL);
 
     let mut buf = [0u8; nrf_802154::MAX_PSDU_SIZE];
     loop {
         match radio.receive(&mut buf).await {
             Ok(meta) => {
-                info!("@RAW {:?}", &buf[..meta.len as usize]);
+                info!(
+                    "Received frame: {} bytes, power {}dBm, LQI {:?}",
+                    meta.len, meta.power, meta.lqi
+                );
             }
             Err(e) => {
                 info!("Receive error: {:?}", e);

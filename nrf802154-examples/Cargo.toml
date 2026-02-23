@@ -1,5 +1,5 @@
 [package]
-name = "nrf52840-examples"
+name = "nrf802154-examples"
 version = "0.1.0"
 edition = "2021"
 description = "IEEE 802.15.4 examples for the nRF52840"

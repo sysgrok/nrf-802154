@@ -1,17 +1,16 @@
-//! Send IEEE 802.15.4 data frames to a specific short address with ACK requested.
+//! IEEE 802.15.4 packet sniffer.
 //!
-//! This example sends a "Hello World" data frame every second to the short address
-//! 0x2323 on PAN 0x4242, channel 15. ACK is requested from the peer.
+//! This example captures all IEEE 802.15.4 frames on a given channel (default: 15)
+//! and prints the raw frame bytes via defmt/RTT. Run with a RTT viewer to see the output.
 //!
-//! Pair with `receive_frame` running on another nRF52840 to observe the frames.
+//! Similar to `receive_all_frames` but outputs raw frame bytes suited for analysis.
 
 #![no_std]
 #![no_main]
 
 use defmt::info;
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
-use nrf52840_examples::{build_data_frame, Irqs};
+use nrf802154_examples::Irqs;
 use nrf_802154::Radio;
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
 use nrf_mpsl::{MultiprotocolServiceLayer, Peripherals as MpslPeripherals};
@@ -19,10 +18,6 @@ use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
 const CHANNEL: u8 = 15;
-const PAN_ID: u16 = 0x4242;
-const SRC_SHORT_ADDR: u16 = 0x2222;
-const DST_SHORT_ADDR: u16 = 0x2323;
-const PAYLOAD: &[u8] = b"Hello World";
 
 static MPSL: StaticCell<MultiprotocolServiceLayer<'static>> = StaticCell::new();
 
@@ -49,29 +44,19 @@ async fn main(spawner: Spawner) {
 
     let mut radio = Radio::new(p.RADIO, p.EGU0, Irqs, mpsl, p.TIMER2, p.RTC2);
     radio.set_channel(CHANNEL);
-    radio.set_pan_id(Some(PAN_ID));
-    radio.set_short_addr(Some(SRC_SHORT_ADDR));
+    radio.set_promiscuous(true);
 
-    let mut seq_number = 0u8;
-    let mut frame_buf = [0u8; nrf_802154::MAX_PSDU_SIZE];
+    info!("Sniffer started on channel {}", CHANNEL);
 
+    let mut buf = [0u8; nrf_802154::MAX_PSDU_SIZE];
     loop {
-        if let Some(frame_len) = build_data_frame(
-            seq_number,
-            PAN_ID,
-            DST_SHORT_ADDR,
-            SRC_SHORT_ADDR,
-            true, // request ACK
-            PAYLOAD,
-            &mut frame_buf,
-        ) {
-            match radio.transmit(&frame_buf[..frame_len], true, None).await {
-                Ok(_) => info!("Send frame with sequence number {}", seq_number),
-                Err(e) => info!("Transmit error: {:?}", e),
+        match radio.receive(&mut buf).await {
+            Ok(meta) => {
+                info!("@RAW {:?}", &buf[..meta.len as usize]);
+            }
+            Err(e) => {
+                info!("Receive error: {:?}", e);
             }
         }
-
-        seq_number = seq_number.wrapping_add(1);
-        Timer::after(Duration::from_millis(1000)).await;
     }
 }

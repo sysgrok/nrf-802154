@@ -24,7 +24,7 @@ The GitHub Actions workflow (`.github/workflows/check.yml`) runs both steps on e
 
 ```
 nrf-802154/           ← root workspace
-├── Cargo.toml        ← workspace members: nrf-802154-sys, nrf-802154, nrf52840-examples
+├── Cargo.toml        ← workspace members: nrf-802154-sys, nrf-802154, nrf802154-examples
 ├── ci.sh             ← local CI script (clippy for each feature combo)
 ├── rust-toolchain.toml  ← pinned toolchain (currently 1.89); nightly needed only for fmt
 ├── rustfmt.toml      ← nightly fmt config
@@ -41,7 +41,7 @@ nrf-802154/           ← root workspace
 │       ├── openthread.rs
 │       └── fmt.rs
 │
-└── nrf52840-examples/  ← async Embassy examples (this crate)
+└── nrf802154-examples/  ← async Embassy examples (this crate)
     ├── .cargo/config.toml   ← thumbv7em-none-eabi, probe-rs runner for nRF52840_xxAA
     ├── memory.x + build.rs  ← 1 MB Flash / 256 KB RAM linker layout
     └── src/
@@ -68,13 +68,13 @@ nrf-802154/           ← root workspace
 
 - **`cargo check` for the examples crate** (type-check only, no link):
   ```bash
-  cargo check -p nrf52840-examples --target thumbv7em-none-eabi
+  cargo check -p nrf802154-examples --target thumbv7em-none-eabi
   ```
   This will fail at the `nrf-802154-sys` build step without submodules/arm-gcc.
 
 - **⚠️ Do NOT run `cargo build --features nrf52840` at the workspace root.**
   The root `Cargo.toml` is a *virtual workspace* (no `[package]` section). Running
-  `--features X` here applies `X` to **all** workspace members. `nrf52840-examples`
+  `--features X` here applies `X` to **all** workspace members. `nrf802154-examples`
   exposes **no features** (the chip feature is baked into its dependency specs), so
   Cargo errors because it can't find `nrf52840` as a feature of that crate.
   Correct commands:
@@ -83,8 +83,8 @@ nrf-802154/           ← root workspace
   cargo build -p nrf-802154 --features nrf52840
 
   # Check/build just the examples (features are hardcoded in their Cargo.toml):
-  cargo check -p nrf52840-examples --target thumbv7em-none-eabi
-  cargo build -p nrf52840-examples --target thumbv7em-none-eabi
+  cargo check -p nrf802154-examples --target thumbv7em-none-eabi
+  cargo build -p nrf802154-examples --target thumbv7em-none-eabi
   ```
 
 - **`mpsl_clock_lfclk_cfg_t` fields** (from `mpsl_clock.h`):

@@ -21,7 +21,7 @@ cargo clippy -p nrf-802154 --features nrf52840
 cargo clippy -p nrf-802154 --features nrf5340-net --target thumbv8m.main-none-eabi
 cargo clippy -p nrf-802154 --features nrf52840,defmt,openthread
 
-# Check the nRF52840 examples crate.
-# Note: the chip target and features are baked into nrf52840-examples/Cargo.toml, so
+# Check the IEEE 802.15.4 examples crate.
+# Note: the chip target and features are baked into nrf802154-examples/Cargo.toml, so
 # no --features flag is needed or accepted here.
-cargo check -p nrf52840-examples --target thumbv7em-none-eabi
+cargo check -p nrf802154-examples --target thumbv7em-none-eabi
