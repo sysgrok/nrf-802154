@@ -30,11 +30,7 @@ use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
 use nrf_mpsl::{MultiprotocolServiceLayer, Peripherals as MpslPeripherals};
 
 use openthread::enet::{self, EnetDriver, EnetRunner};
-use openthread::sys::otRadioCaps;
-use openthread::{
-    BytesFmt, EmbassyTimeTimer, OpenThread, OtResources, PhyRadioRunner, ProxyRadio,
-    ProxyRadioResources, SimpleRamSettings,
-};
+use openthread::{BytesFmt, OpenThread, OtResources, SimpleRamSettings};
 
 use rand_core::RngCore;
 
@@ -67,9 +63,6 @@ const THREAD_DATASET: &str = if let Some(dataset) = option_env!("THREAD_DATASET"
 } else {
     "0e080000000000010000000300000b35060004001fffe002083a90e3a319a904940708fd1fa298dbd1e3290510fe0458f7db96354eaa6041b880ea9c0f030f4f70656e5468726561642d35386431010258d10410888f813c61972446ab616ee3c556a5910c0402a0f7f8"
 };
-
-const NRF_RADIO_CAPS: otRadioCaps =
-    <Radio<'static> as openthread::Radio>::CAPS.bits();
 
 static MPSL: StaticCell<MultiprotocolServiceLayer<'static>> = StaticCell::new();
 
@@ -119,17 +112,8 @@ async fn main(spawner: Spawner) {
 
     let radio = Radio::new(p.RADIO, p.EGU0, Irqs, mpsl, p.TIMER2, p.RTC2);
 
-    let proxy_radio_resources = mk_static!(ProxyRadioResources, ProxyRadioResources::new());
-    let (proxy_radio, phy_radio_runner) = ProxyRadio::new(proxy_radio_resources);
-
     spawner
-        .spawn(run_radio(phy_radio_runner, radio))
-        .unwrap();
-
-    info!("Radio created");
-
-    spawner
-        .spawn(run_enet_driver(enet_driver_runner, proxy_radio))
+        .spawn(run_enet_driver(enet_driver_runner, radio))
         .unwrap();
 
     let enet_resources = mk_static!(StackResources<ENET_MAX_SOCKETS>, StackResources::new());
@@ -220,19 +204,9 @@ async fn main(spawner: Spawner) {
 #[embassy_executor::task]
 async fn run_enet_driver(
     mut runner: EnetRunner<'static, IPV6_PACKET_SIZE>,
-    radio: ProxyRadio<'static, NRF_RADIO_CAPS>,
+    radio: Radio<'static>,
 ) -> ! {
     runner.run(radio).await
-}
-
-#[embassy_executor::task]
-async fn run_radio(mut runner: PhyRadioRunner<'static>, radio: Radio<'static>) -> ! {
-    runner
-        .run(
-            radio,
-            EmbassyTimeTimer, /*TODO: Likely not precise enough*/
-        )
-        .await
 }
 
 #[embassy_executor::task]
