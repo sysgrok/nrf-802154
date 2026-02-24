@@ -13,15 +13,12 @@ use core::net::Ipv6Addr;
 
 use defmt::info;
 
-use embassy_executor::InterruptExecutor;
 use embassy_executor::Spawner;
 
 use embassy_net::udp::{PacketMetadata, UdpMetadata, UdpSocket};
 
 use embassy_net::{Config, ConfigV6, Ipv6Cidr, Runner, StackResources, StaticConfigV6};
 
-use embassy_nrf::interrupt;
-use embassy_nrf::interrupt::{InterruptExt, Priority};
 use embassy_nrf::mode::Blocking;
 use embassy_nrf::rng::Rng;
 
@@ -59,13 +56,6 @@ macro_rules! mk_static {
         x
     }};
 }
-
-#[interrupt]
-unsafe fn EGU1_SWI1() {
-    EXECUTOR_HIGH.on_interrupt()
-}
-
-static EXECUTOR_HIGH: InterruptExecutor = InterruptExecutor::new();
 
 const BOUND_PORT: u16 = 1212;
 
@@ -132,11 +122,7 @@ async fn main(spawner: Spawner) {
     let proxy_radio_resources = mk_static!(ProxyRadioResources, ProxyRadioResources::new());
     let (proxy_radio, phy_radio_runner) = ProxyRadio::new(proxy_radio_resources);
 
-    // High-priority executor: EGU1_SWI1 (EGU0_SWI0 is used by MPSL/802.15.4)
-    interrupt::EGU1_SWI1.set_priority(Priority::P7);
-
-    let spawner_high = EXECUTOR_HIGH.start(interrupt::EGU1_SWI1);
-    spawner_high
+    spawner
         .spawn(run_radio(phy_radio_runner, radio))
         .unwrap();
 
