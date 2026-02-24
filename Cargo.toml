@@ -4,7 +4,6 @@ members = [
     "nrf-802154-sys",
     "nrf-802154",
     "nrf802154-examples",
-    "nrf802154-openthread-examples",
 ]
 
 [profile.dev]

@@ -1,4 +1,5 @@
-//! Basic example for NRF, demonstrating the integration of `openthread` with `embassy-net`.
+//! Basic example demonstrating the integration of `openthread` with `embassy-net`
+//! on top of the nrf-802154 radio driver.
 //!
 //! The example provisions an MTD device with fixed Thread network settings, waits for the device to connect,
 //! and then sends and receives Ipv6 UDP packets over the `IEEE 802.15.4` radio.
@@ -23,20 +24,24 @@ use embassy_nrf::interrupt;
 use embassy_nrf::interrupt::{InterruptExt, Priority};
 use embassy_nrf::mode::Blocking;
 use embassy_nrf::rng::Rng;
-use embassy_nrf::{bind_interrupts, peripherals, radio};
 
 use heapless::Vec;
 
+use nrf802154_examples::Irqs;
+use nrf_802154::Radio;
+use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
+use nrf_mpsl::{MultiprotocolServiceLayer, Peripherals as MpslPeripherals};
+
 use openthread::enet::{self, EnetDriver, EnetRunner};
-use openthread::nrf::{Ieee802154, NrfRadio};
 use openthread::sys::otRadioCaps;
 use openthread::{
     BytesFmt, EmbassyTimeTimer, OpenThread, OtResources, PhyRadioRunner, ProxyRadio,
-    ProxyRadioResources, Radio, SimpleRamSettings,
+    ProxyRadioResources, SimpleRamSettings,
 };
 
 use rand_core::RngCore;
 
+use static_cell::StaticCell;
 use tinyrlibc as _;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -55,12 +60,8 @@ macro_rules! mk_static {
     }};
 }
 
-bind_interrupts!(struct Irqs {
-    RADIO => radio::InterruptHandler<peripherals::RADIO>;
-});
-
 #[interrupt]
-unsafe fn EGU0_SWI0() {
+unsafe fn EGU1_SWI1() {
     EXECUTOR_HIGH.on_interrupt()
 }
 
@@ -77,16 +78,33 @@ const THREAD_DATASET: &str = if let Some(dataset) = option_env!("THREAD_DATASET"
     "0e080000000000010000000300000b35060004001fffe002083a90e3a319a904940708fd1fa298dbd1e3290510fe0458f7db96354eaa6041b880ea9c0f030f4f70656e5468726561642d35386431010258d10410888f813c61972446ab616ee3c556a5910c0402a0f7f8"
 };
 
-const NRF_RADIO_CAPS: otRadioCaps = NrfRadio::CAPS.bits();
+const NRF_RADIO_CAPS: otRadioCaps =
+    <Radio<'static> as openthread::Radio>::CAPS.bits();
+
+static MPSL: StaticCell<MultiprotocolServiceLayer<'static>> = StaticCell::new();
+
+#[embassy_executor::task]
+async fn mpsl_task(mpsl: &'static MultiprotocolServiceLayer<'static>) -> ! {
+    mpsl.run().await
+}
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let mut config = embassy_nrf::config::Config::default();
-    config.hfclk_source = embassy_nrf::config::HfclkSource::ExternalXtal;
-
-    let p = embassy_nrf::init(config);
+    let p = embassy_nrf::init(Default::default());
 
     info!("Starting...");
+
+    let lfclk_cfg = mpsl_clock_lfclk_cfg_t {
+        source: nrf_mpsl::raw::MPSL_CLOCK_LF_SRC_RC as u8,
+        rc_ctiv: nrf_mpsl::raw::MPSL_RECOMMENDED_RC_CTIV as u8,
+        rc_temp_ctiv: nrf_mpsl::raw::MPSL_RECOMMENDED_RC_TEMP_CTIV as u8,
+        accuracy_ppm: nrf_mpsl::raw::MPSL_DEFAULT_CLOCK_ACCURACY_PPM as u16,
+        skip_wait_lfclk_started: nrf_mpsl::raw::MPSL_DEFAULT_SKIP_WAIT_LFCLK_STARTED != 0,
+    };
+
+    let mpsl_p = MpslPeripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
+    let mpsl = MPSL.init(MultiprotocolServiceLayer::new(mpsl_p, Irqs, lfclk_cfg).unwrap());
+    spawner.must_spawn(mpsl_task(mpsl));
 
     let rng = mk_static!(Rng<'static, Blocking>, Rng::new_blocking(p.RNG));
 
@@ -109,15 +127,15 @@ async fn main(spawner: Spawner) {
 
     info!("About to spawn OT runner");
 
-    let radio = NrfRadio::new(Ieee802154::new(p.RADIO, Irqs));
+    let radio = Radio::new(p.RADIO, p.EGU0, Irqs, mpsl, p.TIMER2, p.RTC2);
 
     let proxy_radio_resources = mk_static!(ProxyRadioResources, ProxyRadioResources::new());
     let (proxy_radio, phy_radio_runner) = ProxyRadio::new(proxy_radio_resources);
 
-    // High-priority executor: EGU0_SWI0, priority level 7
-    interrupt::EGU0_SWI0.set_priority(Priority::P7);
+    // High-priority executor: EGU1_SWI1 (EGU0_SWI0 is used by MPSL/802.15.4)
+    interrupt::EGU1_SWI1.set_priority(Priority::P7);
 
-    let spawner_high = EXECUTOR_HIGH.start(interrupt::EGU0_SWI0);
+    let spawner_high = EXECUTOR_HIGH.start(interrupt::EGU1_SWI1);
     spawner_high
         .spawn(run_radio(phy_radio_runner, radio))
         .unwrap();
@@ -222,7 +240,7 @@ async fn run_enet_driver(
 }
 
 #[embassy_executor::task]
-async fn run_radio(mut runner: PhyRadioRunner<'static>, radio: NrfRadio<'static>) -> ! {
+async fn run_radio(mut runner: PhyRadioRunner<'static>, radio: Radio<'static>) -> ! {
     runner
         .run(
             radio,
