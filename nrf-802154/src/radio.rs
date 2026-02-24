@@ -191,14 +191,10 @@ impl<'d> Radio<'d> {
         _irq: I,
         _mpsl: &'d nrf_mpsl::MultiprotocolServiceLayer<'_>,
         _hp_timer: Peri<'d, embassy_nrf::peripherals::TIMER2>,
-        #[cfg(any(feature = "nrf52832", feature = "nrf52833", feature = "nrf52840"))] _lp_timer: Peri<
-            'd,
-            embassy_nrf::peripherals::RTC2,
-        >,
-        #[cfg(not(any(feature = "nrf52832", feature = "nrf52833", feature = "nrf52840")))] _lp_timer: Peri<
-            'd,
-            embassy_nrf::peripherals::RTC1,
-        >,
+        #[cfg(any(feature = "nrf52832", feature = "nrf52833", feature = "nrf52840"))]
+        _lp_timer: Peri<'d, embassy_nrf::peripherals::RTC2>,
+        #[cfg(not(any(feature = "nrf52832", feature = "nrf52833", feature = "nrf52840")))]
+        _lp_timer: Peri<'d, embassy_nrf::peripherals::RTC1>,
     ) -> Self
     where
         I: Binding<LpTimerIrq, LpTimerInterruptHandler> + Binding<Egu0Irq, Egu0InterruptHandler>,
@@ -273,8 +269,12 @@ impl<'d> Radio<'d> {
         let (mode, ed_threshold) = match cca {
             Cca::Carrier => (raw::NRF_RADIO_CCA_MODE_CARRIER, 0),
             Cca::Ed { ed_threshold } => (raw::NRF_RADIO_CCA_MODE_ED, ed_threshold),
-            Cca::CarrierOrEd { ed_threshold } => (raw::NRF_RADIO_CCA_MODE_CARRIER_OR_ED, ed_threshold),
-            Cca::CarrierAndEd { ed_threshold } => (raw::NRF_RADIO_CCA_MODE_CARRIER_AND_ED, ed_threshold),
+            Cca::CarrierOrEd { ed_threshold } => {
+                (raw::NRF_RADIO_CCA_MODE_CARRIER_OR_ED, ed_threshold)
+            }
+            Cca::CarrierAndEd { ed_threshold } => {
+                (raw::NRF_RADIO_CCA_MODE_CARRIER_AND_ED, ed_threshold)
+            }
         };
 
         // TODO: Solve the i8 vs u8 mismatch
@@ -381,7 +381,8 @@ impl<'d> Radio<'d> {
 
         let status = RadioState::wait(|state| {
             if let RadioStatus::ReceiveDone(psdu_meta) = state.status {
-                buf[..psdu_meta.len as usize].copy_from_slice(&state.rx[1..][..psdu_meta.len as usize]);
+                buf[..psdu_meta.len as usize]
+                    .copy_from_slice(&state.rx[1..][..psdu_meta.len as usize]);
             }
 
             matches!(
@@ -562,12 +563,15 @@ impl<'d> Radio<'d> {
         Self::wait_transmit_done(&mut ack_buf).await
     }
 
-    async fn wait_transmit_done(ack_buf: &mut Option<&mut [u8]>) -> Result<Option<PsduMeta>, Error> {
+    async fn wait_transmit_done(
+        ack_buf: &mut Option<&mut [u8]>,
+    ) -> Result<Option<PsduMeta>, Error> {
         let status = RadioState::wait(|state| {
             if matches!(state.status, RadioStatus::TransmitDone(_)) {
                 if let Some(ack_buf) = ack_buf.as_mut() {
                     if let RadioStatus::TransmitDone(Some(meta)) = state.status {
-                        ack_buf[..meta.len as usize].copy_from_slice(&state.rx[1..][..meta.len as usize]);
+                        ack_buf[..meta.len as usize]
+                            .copy_from_slice(&state.rx[1..][..meta.len as usize]);
                     }
                 }
             }
@@ -681,9 +685,12 @@ unsafe extern "C" fn nrf_802154_cca_failed(error: raw::nrf_802154_cca_error_t) {
 }
 
 #[no_mangle]
-unsafe extern "C" fn nrf_802154_energy_detected(p_result: *const raw::nrf_802154_energy_detected_t) {
+unsafe extern "C" fn nrf_802154_energy_detected(
+    p_result: *const raw::nrf_802154_energy_detected_t,
+) {
     RadioState::update(|state| {
-        state.status = RadioStatus::EnergyDetectionDetected(unsafe { p_result.as_ref().unwrap().ed_dbm })
+        state.status =
+            RadioStatus::EnergyDetectionDetected(unsafe { p_result.as_ref().unwrap().ed_dbm })
     });
 }
 
@@ -724,7 +731,12 @@ unsafe extern "C" fn nrf_802154_received_raw(p_data: *mut u8, power: i8, lqi: u8
 }
 
 #[no_mangle]
-unsafe extern "C" fn nrf_802154_received_timestamp_raw(p_data: *mut u8, power: i8, lqi: u8, time: u64) {
+unsafe extern "C" fn nrf_802154_received_timestamp_raw(
+    p_data: *mut u8,
+    power: i8,
+    lqi: u8,
+    time: u64,
+) {
     RadioState::update(|state| {
         let phr = unsafe { *p_data };
         let total = phr as usize + 1;
@@ -765,7 +777,9 @@ unsafe extern "C" fn nrf_802154_transmitted_raw(
             let total = p_metadata.data.transmitted.length as usize;
 
             if (MIN_PHR as usize..=MAX_PACKET_SIZE).contains(&total) {
-                let packet = unsafe { core::slice::from_raw_parts(p_metadata.data.transmitted.p_ack, total) };
+                let packet = unsafe {
+                    core::slice::from_raw_parts(p_metadata.data.transmitted.p_ack, total)
+                };
 
                 state.rx[..total].copy_from_slice(packet);
 

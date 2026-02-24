@@ -47,8 +47,12 @@ struct Target {
 impl Target {
     fn new(series: Series, target: String) -> Self {
         let (cpu, float_abi, chip_family, chip, core, chip_core) = match (series, target.as_str()) {
-            (Series::Nrf52, "thumbv7em-none-eabihf") => ("cortex-m4", "hard", "nrf52840", "NRF52840_XXAA", None, None),
-            (Series::Nrf52, "thumbv7em-none-eabi") => ("cortex-m4", "soft", "nrf52840", "NRF52840_XXAA", None, None),
+            (Series::Nrf52, "thumbv7em-none-eabihf") => {
+                ("cortex-m4", "hard", "nrf52840", "NRF52840_XXAA", None, None)
+            }
+            (Series::Nrf52, "thumbv7em-none-eabi") => {
+                ("cortex-m4", "soft", "nrf52840", "NRF52840_XXAA", None, None)
+            }
             (Series::Nrf53, "thumbv8m.main-none-eabi") => (
                 "cortex-m33+nodsp",
                 "soft",
@@ -248,7 +252,9 @@ fn main() {
         .create(true)
         .open(out_path.join("bindings.rs"))
         .unwrap();
-    bindings.write(Box::new(&file)).expect("Couldn't write bindgen output");
+    bindings
+        .write(Box::new(&file))
+        .expect("Couldn't write bindgen output");
 
     let lib_sl_path = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
         .join("third_party/nordic/nrfxlib/nrf_802154/sl/sl/lib")
@@ -260,8 +266,14 @@ fn main() {
     let lib_common_path = lib_out_path.join("common");
 
     println!("cargo:rustc-link-search={}", lib_sl_path.to_str().unwrap());
-    println!("cargo:rustc-link-search={}", lib_driver_path.to_str().unwrap());
-    println!("cargo:rustc-link-search={}", lib_common_path.to_str().unwrap());
+    println!(
+        "cargo:rustc-link-search={}",
+        lib_driver_path.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-link-search={}",
+        lib_common_path.to_str().unwrap()
+    );
 
     println!("cargo:rustc-link-lib=static=nrf-802154-driver");
     println!("cargo:rustc-link-lib=static=nrf-802154-common");
