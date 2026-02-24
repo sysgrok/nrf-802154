@@ -81,11 +81,7 @@ impl openthread::Radio for OpenThreadRadio<'_> {
 
     const CAPS: openthread::Capabilities = openthread::Capabilities::ACK_TIMEOUT;
 
-    const MAC_CAPS: openthread::MacCapabilities = openthread::MacCapabilities::TX_ACK
-        .union(openthread::MacCapabilities::RX_ACK)
-        .union(openthread::MacCapabilities::FILTER_PAN_ID)
-        .union(openthread::MacCapabilities::FILTER_SHORT_ADDR)
-        .union(openthread::MacCapabilities::FILTER_EXT_ADDR);
+    const MAC_CAPS: openthread::MacCapabilities = openthread::MacCapabilities::all();
 
     async fn set_config(&mut self, config: &openthread::Config) -> Result<(), Self::Error> {
         if self.config != *config {
