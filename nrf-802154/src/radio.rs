@@ -433,7 +433,6 @@ impl<'d> Radio<'d> {
             }
         }
 
-        // TODO: Potential race condition if the radio is scheduled to transmit but not transmitting yet
         let packet_data = RadioState::wait(|state| {
             if !matches!(state.status, RadioStatus::Transmitting) {
                 state.tx[0] = data.len() as u8 + 2; // + CRC/FCS
@@ -451,29 +450,44 @@ impl<'d> Radio<'d> {
         .await;
 
         STATE.lock(|state| {
-            state.borrow_mut().status = RadioStatus::Idle;
+            let mut state = state.borrow_mut();
+            state.status = RadioStatus::Idle;
+            state.tx_result = None;
         });
 
-        let scheduled = unsafe {
-            raw::nrf_802154_transmit_raw(
-                packet_data,
-                &raw::nrf_802154_transmit_metadata_t {
-                    frame_props: raw::nrf_802154_transmitted_frame_props_t {
-                        is_secured: false,
-                        dynamic_data_is_set: false,
-                    },
-                    cca,
-                    tx_power: raw::nrf_802154_tx_power_metadata_t {
-                        use_metadata_value: false,
-                        power: 0,
-                    },
-                    tx_channel: raw::nrf_802154_tx_channel_metadata_t {
-                        use_metadata_value: false,
-                        channel: 0,
-                    },
-                },
-            )
+        let metadata = raw::nrf_802154_transmit_metadata_t {
+            frame_props: raw::nrf_802154_transmitted_frame_props_t {
+                is_secured: false,
+                dynamic_data_is_set: false,
+            },
+            cca,
+            tx_power: raw::nrf_802154_tx_power_metadata_t {
+                use_metadata_value: false,
+                power: 0,
+            },
+            tx_channel: raw::nrf_802154_tx_channel_metadata_t {
+                use_metadata_value: false,
+                channel: 0,
+            },
         };
+
+        // nrf_802154_transmit_raw uses TERM_NONE, which cannot abort in-progress
+        // RX (during PSDU reception), TX_ACK, or CCA operations. If the C driver
+        // is busy, yield to let ISRs complete the current operation, then retry.
+        let mut scheduled = false;
+        for _ in 0..10 {
+            scheduled = unsafe { raw::nrf_802154_transmit_raw(packet_data, &metadata) };
+            if scheduled {
+                break;
+            }
+            // Yield to let the executor poll other tasks and allow pending ISRs
+            // (RADIO, TIMER) to fire and complete the in-progress operation.
+            core::future::poll_fn(|cx| {
+                cx.waker().wake_by_ref();
+                core::task::Poll::<()>::Pending
+            })
+            .await;
+        }
 
         if !scheduled {
             return Err(Error::ScheduleTransmit);
@@ -533,7 +547,9 @@ impl<'d> Radio<'d> {
         .await;
 
         STATE.lock(|state| {
-            state.borrow_mut().status = RadioStatus::Idle;
+            let mut state = state.borrow_mut();
+            state.status = RadioStatus::Idle;
+            state.tx_result = None;
         });
 
         let scheduled = unsafe {
@@ -566,30 +582,23 @@ impl<'d> Radio<'d> {
     async fn wait_transmit_done(
         ack_buf: &mut Option<&mut [u8]>,
     ) -> Result<Option<PsduMeta>, Error> {
-        let status = RadioState::wait(|state| {
-            if matches!(state.status, RadioStatus::TransmitDone(_)) {
+        let tx_result = RadioState::wait(|state| {
+            if let Some(TxResult::Done(_)) = &state.tx_result {
                 if let Some(ack_buf) = ack_buf.as_mut() {
-                    if let RadioStatus::TransmitDone(Some(meta)) = state.status {
+                    if let Some(TxResult::Done(Some(meta))) = state.tx_result {
                         ack_buf[..meta.len as usize]
                             .copy_from_slice(&state.rx[1..][..meta.len as usize]);
                     }
                 }
             }
 
-            matches!(
-                state.status,
-                RadioStatus::TransmitFailed(_) | RadioStatus::TransmitDone(_)
-            )
-            .then_some(state.status)
+            state.tx_result.take()
         })
         .await;
 
-        if let RadioStatus::TransmitDone(psdu_meta) = status {
-            Ok(psdu_meta)
-        } else if let RadioStatus::TransmitFailed(code) = status {
-            Err(Error::Transmit(TxError::from(code)))
-        } else {
-            unreachable!("RadioState::wait must return TransmitDone or TransmitFailed");
+        match tx_result {
+            TxResult::Done(psdu_meta) => Ok(psdu_meta),
+            TxResult::Failed(code) => Err(Error::Transmit(TxError::from(code))),
         }
     }
 }
@@ -622,14 +631,24 @@ enum RadioStatus {
     EnergyDetectionFailed(raw::nrf_802154_ed_error_t),
     Transmitting,
     TxAckStarted,
-    TransmitFailed(raw::nrf_802154_tx_error_t),
-    TransmitDone(Option<PsduMeta>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+enum TxResult {
+    Failed(raw::nrf_802154_tx_error_t),
+    Done(Option<PsduMeta>),
 }
 
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 struct RadioState {
     status: RadioStatus,
+    /// Separate TX completion result, not overwritten by RX callbacks.
+    /// This prevents a race where a received frame (from the C driver's
+    /// auto-RX after TX) overwrites a pending TransmitDone status before
+    /// `wait_transmit_done` can process it.
+    tx_result: Option<TxResult>,
     tx: [u8; MAX_PACKET_SIZE],
     rx: [u8; MAX_PACKET_SIZE],
 }
@@ -638,6 +657,7 @@ impl RadioState {
     const fn new() -> Self {
         Self {
             status: RadioStatus::Idle,
+            tx_result: None,
             tx: [0; MAX_PACKET_SIZE],
             rx: [0; MAX_PACKET_SIZE],
         }
@@ -783,22 +803,22 @@ unsafe extern "C" fn nrf_802154_transmitted_raw(
 
                 state.rx[..total].copy_from_slice(packet);
 
-                state.status = RadioStatus::TransmitDone(Some(PsduMeta {
+                state.tx_result = Some(TxResult::Done(Some(PsduMeta {
                     len: (total - 1 - 2) as u8, // total - PHR - FCS
                     crc: u16::from_le_bytes([state.rx[total - 2], state.rx[total - 1]]),
                     power: p_metadata.data.transmitted.power,
                     lqi: Some(p_metadata.data.transmitted.lqi),
                     time: Some(p_metadata.data.transmitted.time),
-                }));
+                })));
             } else {
-                state.status = RadioStatus::TransmitDone(None);
+                state.tx_result = Some(TxResult::Done(None));
             }
 
             unsafe {
                 raw::nrf_802154_buffer_free_raw(p_metadata.data.transmitted.p_ack);
             }
         } else {
-            state.status = RadioStatus::TransmitDone(None);
+            state.tx_result = Some(TxResult::Done(None));
         }
     });
 }
@@ -809,7 +829,7 @@ unsafe extern "C" fn nrf_802154_transmit_failed(
     error: raw::nrf_802154_tx_error_t,
     _p_metadata: *const raw::nrf_802154_transmit_done_metadata_t,
 ) {
-    RadioState::update(|state| state.status = RadioStatus::TransmitFailed(error));
+    RadioState::update(|state| state.tx_result = Some(TxResult::Failed(error)));
 }
 
 #[no_mangle]
