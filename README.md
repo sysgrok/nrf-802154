@@ -1,5 +1,9 @@
 # `nrf-802154`
 
+[![CI](https://github.com/sysgrok/nrf-802154/actions/workflows/ci.yml/badge.svg)](https://github.com/sysgrok/nrf-802154/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/nrf-802154.svg)](https://crates.io/crates/nrf-802154)
+[![Matrix](https://img.shields.io/matrix/matter-rs:matrix.org?label=join%20matrix&color=BEC5C9&logo=matrix)](https://matrix.to/#/#matter-rs:matrix.org)
+
 Rust bindings for the Nordic Semiconductor nRF series 802.15.4 Radio Driver.
 
 The 802.15.4 Radio Driver is an open source library written by Nordic for their microcontrollers that provides a
