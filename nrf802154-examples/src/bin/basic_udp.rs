@@ -19,7 +19,7 @@ use embassy_nrf::mode::Blocking;
 use embassy_nrf::rng::Rng;
 
 use nrf802154_examples::Irqs;
-use nrf_802154::Radio;
+use nrf_802154::{OpenThreadRadio, Radio};
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
 use nrf_mpsl::{MultiprotocolServiceLayer, Peripherals as MpslPeripherals};
 
@@ -101,6 +101,7 @@ async fn main(spawner: Spawner) {
     info!("About to spawn OT runner");
 
     let radio = Radio::new(p.RADIO, p.EGU0, Irqs, mpsl, p.TIMER2, p.RTC2);
+    let radio = OpenThreadRadio::new(radio);
 
     spawner.spawn(run_ot(ot.clone(), radio)).unwrap();
 
@@ -138,7 +139,7 @@ async fn main(spawner: Spawner) {
 }
 
 #[embassy_executor::task]
-async fn run_ot(ot: OpenThread<'static>, radio: Radio<'static>) -> ! {
+async fn run_ot(ot: OpenThread<'static>, radio: OpenThreadRadio<'static>) -> ! {
     ot.run(radio).await
 }
 

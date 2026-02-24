@@ -25,7 +25,7 @@ use embassy_nrf::rng::Rng;
 use heapless::Vec;
 
 use nrf802154_examples::Irqs;
-use nrf_802154::Radio;
+use nrf_802154::{OpenThreadRadio, Radio};
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
 use nrf_mpsl::{MultiprotocolServiceLayer, Peripherals as MpslPeripherals};
 
@@ -111,6 +111,7 @@ async fn main(spawner: Spawner) {
     info!("About to spawn OT runner");
 
     let radio = Radio::new(p.RADIO, p.EGU0, Irqs, mpsl, p.TIMER2, p.RTC2);
+    let radio = OpenThreadRadio::new(radio);
 
     spawner
         .spawn(run_enet_driver(enet_driver_runner, radio))
@@ -204,7 +205,7 @@ async fn main(spawner: Spawner) {
 #[embassy_executor::task]
 async fn run_enet_driver(
     mut runner: EnetRunner<'static, IPV6_PACKET_SIZE>,
-    radio: Radio<'static>,
+    radio: OpenThreadRadio<'static>,
 ) -> ! {
     runner.run(radio).await
 }

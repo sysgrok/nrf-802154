@@ -145,4 +145,6 @@ mod openthread;
 mod platform;
 mod radio;
 
+#[cfg(feature = "openthread")]
+pub use openthread::OpenThreadRadio;
 pub use platform::{Egu0InterruptHandler, LpTimerInterruptHandler};
