@@ -25,3 +25,6 @@ cargo clippy -p nrf-802154 --features nrf52840,defmt,openthread
 # Note: the chip target and features are baked into nrf802154-examples/Cargo.toml, so
 # no --features flag is needed or accepted here.
 cargo build -p nrf802154-examples --target thumbv7em-none-eabi
+
+# Build the OpenThread examples crate (OpenThread Ipv6 send/receive over IEEE 802.15.4).
+cargo build -p nrf802154-openthread-examples --target thumbv7em-none-eabi
