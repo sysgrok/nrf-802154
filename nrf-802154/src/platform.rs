@@ -183,7 +183,9 @@ extern "C" fn nrf_802154_clock_hfclk_latency_set(_latency: u32) {}
 #[no_mangle]
 extern "C" fn nrf_802154_hp_timer_init() {
     let timer = hp_timer();
-    timer.mode().write(|w| w.set_mode(pac::timer::vals::Mode::TIMER));
+    timer
+        .mode()
+        .write(|w| w.set_mode(pac::timer::vals::Mode::TIMER));
     timer
         .bitmode()
         .write(|w| w.set_bitmode(pac::timer::vals::Bitmode::_32BIT));
@@ -297,7 +299,9 @@ extern "C" fn nrf_802154_platform_timestamper_local_domain_connections_setup(_dp
 extern "C" fn nrf_802154_platform_timestamper_local_domain_connections_clear(_dppi_ch: u32) {}
 
 #[no_mangle]
-extern "C" fn nrf_802154_platform_timestamper_captured_timestamp_read(_p_captured: *mut u64) -> bool {
+extern "C" fn nrf_802154_platform_timestamper_captured_timestamp_read(
+    _p_captured: *mut u64,
+) -> bool {
     false
 }
 
@@ -547,7 +551,10 @@ const LPTIMER_TOO_LATE: u32 = 1;
 const LPTIMER_WRONG_STATE: u32 = 4;
 
 #[no_mangle]
-extern "C" fn nrf_802154_platform_sl_lptimer_hw_task_prepare(fire_lpticks: u64, _ppi_channel: u32) -> u32 {
+extern "C" fn nrf_802154_platform_sl_lptimer_hw_task_prepare(
+    fire_lpticks: u64,
+    _ppi_channel: u32,
+) -> u32 {
     let rtc = lp_timer();
     let cc_val = (fire_lpticks & RTC_COUNTER_MAX as u64) as u32;
     // Clear event and disable routing before writing CC[2] to avoid losing
@@ -785,7 +792,8 @@ extern "C" fn nrf_802154_irq_priority_get(irqn: u32) -> u32 {
     // the logical priority (raw register value >> (8 - __NVIC_PRIO_BITS)).
     // cortex_m::NVIC::get_priority returns the raw register value, so shift
     // it to match CMSIS convention.
-    (cortex_m::peripheral::NVIC::get_priority(IrqNumber(irqn as u16)) >> (8 - NVIC_PRIO_BITS)) as u32
+    (cortex_m::peripheral::NVIC::get_priority(IrqNumber(irqn as u16)) >> (8 - NVIC_PRIO_BITS))
+        as u32
 }
 
 // =============================================================================
@@ -809,7 +817,10 @@ extern "C" fn nrf_802154_random_init() {
     #[cfg(feature = "nrf53")]
     let (id0, id1) = {
         let ficr = pac::FICR;
-        (ficr.info().deviceid(0).read(), ficr.info().deviceid(1).read())
+        (
+            ficr.info().deviceid(0).read(),
+            ficr.info().deviceid(1).read(),
+        )
     };
     let seed = id0 ^ id1;
     // Ensure non-zero seed (xorshift requires non-zero state)

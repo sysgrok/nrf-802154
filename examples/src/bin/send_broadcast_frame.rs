@@ -10,13 +10,17 @@
 #![no_main]
 
 use defmt::info;
+
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
-use nrf802154_examples::{build_data_frame, Irqs};
+
 use nrf_802154::Radio;
+use nrf_802154_examples::{build_data_frame, Irqs};
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
 use nrf_mpsl::{MultiprotocolServiceLayer, Peripherals as MpslPeripherals};
+
 use static_cell::StaticCell;
+
 use {defmt_rtt as _, panic_probe as _};
 
 const CHANNEL: u8 = 15;

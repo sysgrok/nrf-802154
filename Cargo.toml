@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "nrf-802154-sys",
     "nrf-802154",
-    "nrf802154-examples",
+    "examples",
 ]
 
 [profile.dev]

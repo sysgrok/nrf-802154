@@ -1,0 +1,66 @@
+[package]
+name = "nrf-802154-examples"
+version = "0.1.0"
+edition = "2021"
+description = "IEEE 802.15.4 examples for the nRF52840"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "receive_frame"
+path = "src/bin/receive_frame.rs"
+
+[[bin]]
+name = "receive_all_frames"
+path = "src/bin/receive_all_frames.rs"
+
+[[bin]]
+name = "send_frame"
+path = "src/bin/send_frame.rs"
+
+[[bin]]
+name = "send_broadcast_frame"
+path = "src/bin/send_broadcast_frame.rs"
+
+[[bin]]
+name = "sniffer"
+path = "src/bin/sniffer.rs"
+
+[[bin]]
+name = "basic_udp"
+path = "src/bin/basic_udp.rs"
+harness = false
+
+[[bin]]
+name = "basic_enet"
+path = "src/bin/basic_enet.rs"
+harness = false
+
+[[bin]]
+name = "srp"
+path = "src/bin/srp.rs"
+harness = false
+
+[dependencies]
+nrf-802154 = { path = "../nrf-802154", features = ["nrf52840", "defmt", "openthread"] }
+nrf-mpsl = { version = "0.3.0", features = ["nrf52840", "critical-section-impl"] }
+
+openthread = { version = "0.1.0", features = ["udp", "srp", "embassy-net-driver-channel", "defmt"] }
+tinyrlibc = { version = "0.5", default-features = false, features = ["strstr", "strcmp", "isupper", "utoa", "strtoul"] }
+
+embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread", "defmt"] }
+embassy-nrf = { version = "0.9", features = ["nrf52840", "time-driver-rtc1", "unstable-pac", "time"] }
+embassy-sync = { version = "0.7", features = ["defmt"] }
+embassy-futures = "0.1"
+embassy-time = { version = "0.5", features = ["defmt"] }
+embassy-net = { version = "0.7", features = ["defmt", "proto-ipv6", "medium-ip", "udp"] }
+
+defmt = "1"
+defmt-rtt = "1"
+
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-probe = { version = "1", features = ["print-defmt"] }
+static_cell = "2"
+heapless = "0.8"
+rand_core = "0.9"
