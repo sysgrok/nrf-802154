@@ -25,6 +25,13 @@ const CCA_CORR_THRESHOLD_DEFAULT: u8 = 0x14;
 /// Nordic default correlator limit for CCA carrier-sense modes
 const CCA_CORR_LIMIT_DEFAULT: u8 = 0x02;
 
+/// Maximum number of retries when `nrf_802154_transmit_raw()` returns false
+/// because the C driver is busy. Each retry yields to let ISRs complete
+/// the in-progress operation (PSDU reception, TX_ACK, etc.). On Cortex-M,
+/// the yield returns to the executor which checks for pending interrupts
+/// before re-polling this task.
+const TRANSMIT_SCHEDULE_RETRIES: usize = 10;
+
 /// Transmit error reason
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -474,8 +481,11 @@ impl<'d> Radio<'d> {
         // nrf_802154_transmit_raw uses TERM_NONE, which cannot abort in-progress
         // RX (during PSDU reception), TX_ACK, or CCA operations. If the C driver
         // is busy, yield to let ISRs complete the current operation, then retry.
+        // On Cortex-M, between returning Pending and the next poll, the executor
+        // processes any pending hardware interrupts (RADIO ISR, etc.), allowing
+        // the C driver's state machine to advance and complete the blocking operation.
         let mut scheduled = false;
-        for _ in 0..10 {
+        for _ in 0..TRANSMIT_SCHEDULE_RETRIES {
             scheduled = unsafe { raw::nrf_802154_transmit_raw(packet_data, &metadata) };
             if scheduled {
                 break;
