@@ -376,9 +376,34 @@ impl<'d> Radio<'d> {
     /// - `Err(Error::EnterReceive)` if the radio could not enter receive mode
     /// - `Err(Error::Receive)` if the reception failed (CRC error, aborted, etc)
     pub async fn receive(&mut self, buf: &mut [u8]) -> Result<PsduMeta, Error> {
-        STATE.lock(|state| {
-            state.borrow_mut().status = RadioStatus::Idle;
+        // Check for an already-pending received frame before clearing status.
+        // This handles the common case where the C driver auto-enters RX after
+        // a transmit (rx_on_when_idle=true) and a response frame arrives before
+        // the next receive() call. Without this check, the ReceiveDone status
+        // would be cleared, losing the frame.
+        let pending = STATE.lock(|state| {
+            let mut state = state.borrow_mut();
+            match state.status {
+                RadioStatus::ReceiveDone(psdu_meta) => {
+                    buf[..psdu_meta.len as usize]
+                        .copy_from_slice(&state.rx[1..][..psdu_meta.len as usize]);
+                    state.status = RadioStatus::Idle;
+                    Some(Ok(psdu_meta))
+                }
+                RadioStatus::ReceiveFailed(_) => {
+                    state.status = RadioStatus::Idle;
+                    Some(Err(Error::Receive))
+                }
+                _ => {
+                    state.status = RadioStatus::Idle;
+                    None
+                }
+            }
         });
+
+        if let Some(result) = pending {
+            return result;
+        }
 
         let receive_entered = unsafe { raw::nrf_802154_receive() };
 
@@ -597,7 +622,7 @@ impl<'d> Radio<'d> {
                 if let Some(ack_buf) = ack_buf.as_mut() {
                     if let Some(TxResult::Done(Some(meta))) = state.tx_result {
                         ack_buf[..meta.len as usize]
-                            .copy_from_slice(&state.rx[1..][..meta.len as usize]);
+                            .copy_from_slice(&state.ack_rx[1..][..meta.len as usize]);
                     }
                 }
             }
@@ -661,6 +686,9 @@ struct RadioState {
     tx_result: Option<TxResult>,
     tx: [u8; MAX_PACKET_SIZE],
     rx: [u8; MAX_PACKET_SIZE],
+    /// Separate buffer for TX ACK data, so `nrf_802154_received_raw` cannot
+    /// overwrite ACK data in `rx[]` before `wait_transmit_done` reads it.
+    ack_rx: [u8; MAX_PACKET_SIZE],
 }
 
 impl RadioState {
@@ -670,6 +698,7 @@ impl RadioState {
             tx_result: None,
             tx: [0; MAX_PACKET_SIZE],
             rx: [0; MAX_PACKET_SIZE],
+            ack_rx: [0; MAX_PACKET_SIZE],
         }
     }
 
@@ -811,11 +840,11 @@ unsafe extern "C" fn nrf_802154_transmitted_raw(
                     core::slice::from_raw_parts(p_metadata.data.transmitted.p_ack, total)
                 };
 
-                state.rx[..total].copy_from_slice(packet);
+                state.ack_rx[..total].copy_from_slice(packet);
 
                 state.tx_result = Some(TxResult::Done(Some(PsduMeta {
                     len: (total - 1 - 2) as u8, // total - PHR - FCS
-                    crc: u16::from_le_bytes([state.rx[total - 2], state.rx[total - 1]]),
+                    crc: u16::from_le_bytes([state.ack_rx[total - 2], state.ack_rx[total - 1]]),
                     power: p_metadata.data.transmitted.power,
                     lqi: Some(p_metadata.data.transmitted.lqi),
                     time: Some(p_metadata.data.transmitted.time),
