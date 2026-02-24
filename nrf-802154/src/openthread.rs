@@ -1,4 +1,4 @@
-use crate::{Cca, Error, PsduMeta, Radio, MAX_PSDU_SIZE};
+use crate::{Error, PsduMeta, Radio, MAX_PSDU_SIZE};
 
 impl openthread::RadioError for Error {
     fn kind(&self) -> openthread::RadioErrorKind {
@@ -8,23 +8,6 @@ impl openthread::RadioError for Error {
             }
             Error::ScheduleTransmit | Error::Transmit(_) => openthread::RadioErrorKind::TxFailed,
             Error::EnterReceive | Error::Receive => openthread::RadioErrorKind::RxFailed,
-        }
-    }
-}
-
-impl Cca {
-    fn from_openthread(cca: &openthread::Cca) -> Self {
-        match cca {
-            openthread::Cca::Carrier => Cca::Carrier,
-            openthread::Cca::Ed { ed_threshold } => Cca::Ed {
-                ed_threshold: *ed_threshold,
-            },
-            openthread::Cca::CarrierOrEd { ed_threshold } => Cca::CarrierOrEd {
-                ed_threshold: *ed_threshold,
-            },
-            openthread::Cca::CarrierAndEd { ed_threshold } => Cca::CarrierAndEd {
-                ed_threshold: *ed_threshold,
-            },
         }
     }
 }
@@ -59,7 +42,12 @@ impl openthread::Radio for Radio<'_> {
     async fn set_config(&mut self, config: &openthread::Config) -> Result<(), Self::Error> {
         self.set_channel(config.channel);
         self.set_tx_power(config.power);
-        self.set_cca(Cca::from_openthread(&config.cca));
+        // CCA is intentionally NOT forwarded from the openthread Config.
+        // The openthread crate defaults to Cca::Carrier (correlator-based carrier sense),
+        // which produces false CCABUSY results on nRF52840. The Nordic 802.15.4 C driver's
+        // PIB defaults (Energy Detection at -75 dBm, set during nrf_802154_pib_init) are
+        // well-tested and IEEE 802.15.4 compliant. Users can still override CCA via
+        // Radio::set_cca() before passing the radio to OpenThread if needed.
         self.set_pan_id(config.pan_id);
         self.set_short_addr(config.short_addr);
         self.set_ext_addr(config.ext_addr);
