@@ -54,7 +54,7 @@ nrf54h = []
 #nrf-mpsl-sys = "0.2.0"
 
 [build-dependencies]
-bindgen = "0.72.0"
+bindgen = "0.72"
 doxygen-rs = "0.4.2"
 winnow = "0.7.12"
 cmake = "0.1.54"
