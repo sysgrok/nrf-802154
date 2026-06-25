@@ -1,5 +1,7 @@
-[![crates.io](https://img.shields.io/crates/v/nrf-802154.svg)](https://crates.io/crates/nrf-802154)
-[![docs.rs](https://docs.rs/nrf-sdc/badge.svg)](https://docs.rs/nrf-802154)
+[![license](https://img.shields.io/badge/license-Apache2-green.svg)](https://raw.githubusercontent.com/sysgrok/nrf-802154/main/LICENSE)
+[![CI](https://github.com/sysgrok/nrf-802154/actions/workflows/ci.yml/badge.svg)](https://github.com/sysgrok/nrf-802154/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/rs-matter.svg)](https://crates.io/crates/nrf-802154)
+[![Matrix](https://img.shields.io/matrix/rs-matter:matrix.org?label=join%20matrix&color=BEC5C9&logo=matrix)](https://matrix.to/#/#rs-matter:matrix.org)
 
 # nRF 802.15.4 Radio Driver - WIP
 
