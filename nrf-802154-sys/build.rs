@@ -5,6 +5,7 @@
 
 use std::env;
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 
 enum Series {
@@ -211,6 +212,10 @@ fn build(target: &Target) {
         .collect::<Vec<_>>()
         .join(" ");
 
+    if let Err(err) = patch_cmake_config(&manifest_path) {
+        println!("cargo:warning=Could not patch CMake configuration: {err}");
+    }
+
     cmake::Config::new("third_party/nordic/nrfxlib/nrf_802154")
         .define("CMAKE_BUILD_TYPE", "MinSizeRel")
         .define(
@@ -232,6 +237,56 @@ fn build(target: &Target) {
         .define("BUILD_TESTING", "OFF")
         .build_target("nrf-802154-driver")
         .build();
+}
+
+/// Adds `cmake_minimum_required` to the upstream `CMakeLists.txt`.
+///
+/// This is a required property starting from CMake 4.0. See
+/// [CMP0000](https://cmake.org/cmake/help/latest/policy/CMP0000.html) for more details.
+fn patch_cmake_config(manifest_path: &PathBuf) -> Result<(), String> {
+    let cmake_major_version = get_cmake_major_version().unwrap_or(0);
+    if cmake_major_version < 4 {
+        return Ok(());
+    }
+
+    let cmake_lists_path =
+        manifest_path.join("third_party/nordic/nrfxlib/nrf_802154/CMakeLists.txt");
+    let content = std::fs::read_to_string(&cmake_lists_path)
+        .map_err(|err| format!("failed to read {}: {err}", cmake_lists_path.display()))?;
+    if content.contains("cmake_minimum_required") {
+        return Ok(());
+    }
+
+    let patched = format!("cmake_minimum_required(VERSION 3.5)\n{content}");
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .open(&cmake_lists_path)
+        .map_err(|err| {
+            format!(
+                "failed to open {} for patching: {err}",
+                cmake_lists_path.display()
+            )
+        })?;
+    file.write_all(patched.as_bytes())
+        .map_err(|err| format!("failed to write {}: {err}", cmake_lists_path.display()))?;
+
+    Ok(())
+}
+
+fn get_cmake_major_version() -> Option<u32> {
+    let output = std::process::Command::new("cmake")
+        .arg("--version")
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("cmake version "))
+        .and_then(|version| version.split('.').next())
+        .and_then(|major| major.parse().ok())
 }
 
 fn main() {
