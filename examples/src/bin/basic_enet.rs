@@ -22,6 +22,8 @@ use embassy_net::{Config, ConfigV6, Ipv6Cidr, Runner, StackResources, StaticConf
 use embassy_nrf::mode::Blocking;
 use embassy_nrf::rng::Rng;
 
+use embedded_alloc::LlffHeap as Heap;
+
 use heapless::Vec;
 
 use nrf_802154::{OpenThreadRadio, Radio};

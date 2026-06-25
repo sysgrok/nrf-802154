@@ -12,6 +12,8 @@ use defmt::info;
 
 use embassy_executor::Spawner;
 
+use embedded_alloc::LlffHeap as Heap;
+
 use nrf_802154::Radio;
 use nrf_802154_examples::Irqs;
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;

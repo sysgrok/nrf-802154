@@ -18,6 +18,8 @@ use embassy_executor::Spawner;
 use embassy_nrf::mode::Blocking;
 use embassy_nrf::rng::Rng;
 
+use embedded_alloc::LlffHeap as Heap;
+
 use nrf_802154::{OpenThreadRadio, Radio};
 use nrf_802154_examples::Irqs;
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;

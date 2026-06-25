@@ -22,6 +22,8 @@ use embassy_executor::Spawner;
 use embassy_nrf::mode::Blocking;
 use embassy_nrf::rng::Rng;
 
+use embedded_alloc::LlffHeap as Heap;
+
 use nrf_802154::{OpenThreadRadio, Radio};
 use nrf_802154_examples::Irqs;
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
@@ -75,6 +77,14 @@ static MPSL: StaticCell<MultiprotocolServiceLayer<'static>> = StaticCell::new();
 async fn mpsl_task(mpsl: &'static MultiprotocolServiceLayer<'static>) -> ! {
     mpsl.run().await
 }
+
+// Only needed for tinyrlibc's alloc functions which won't be called at runtime.
+//
+// If the firmware would not use or need heap allocation for other purposes, this could be replaced
+// with stub impls of `calloc` and `free` that panic with `unimplemented!()`,
+// and the `#[global_allocator]` attribute could be removed.
+#[global_allocator]
+static HEAP: Heap = Heap::empty();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
