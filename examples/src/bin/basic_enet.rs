@@ -173,6 +173,13 @@ async fn main(spawner: Spawner) {
 
             break;
         }
+
+        // No address yet. Yield until OpenThread signals a state change instead of
+        // busy-looping: on the single embassy executor a tight loop here starves
+        // the `run_enet_driver` task that drives the radio + OpenThread core, so the
+        // device would never attach (and thus never get an address). `basic_udp`
+        // avoids this because its loops always `.await`.
+        ot.wait_changed().await;
     }
 
     let (mut rx_meta, mut tx_meta) = ([PacketMetadata::EMPTY; 2], [PacketMetadata::EMPTY; 2]);
