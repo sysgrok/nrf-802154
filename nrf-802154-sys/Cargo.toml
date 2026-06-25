@@ -6,7 +6,7 @@ edition = "2021"
 description = "Low level Rust bindings to the NRF 802.15.4 Radio Driver"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sysgrok/nrf-802154"
-rust-version = "1.77"
+rust-version = "1.87"
 
 # TODO: Double-check that the below is good-enough for the 802.15.4 driver build (both bindgen and cmake)
 include = [

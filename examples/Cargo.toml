@@ -42,18 +42,18 @@ path = "src/bin/srp.rs"
 harness = false
 
 [dependencies]
-nrf-802154 = { path = "../nrf-802154", features = ["nrf52840", "defmt", "openthread"] }
+nrf-802154 = { path = "../nrf-802154", version = "0.1", features = ["nrf52840", "defmt", "openthread"] }
 nrf-mpsl = { version = "0.3.0", features = ["nrf52840", "critical-section-impl"] }
 
-openthread = { version = "0.1.0", features = ["udp", "srp", "embassy-net-driver-channel", "defmt"] }
+openthread = { version = "0.2", features = ["udp", "srp", "embassy-net-driver-channel", "defmt"] }
 tinyrlibc = { version = "0.5", default-features = false, features = ["strstr", "strcmp", "isupper", "utoa", "strtoul"] }
 
-embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread", "defmt"] }
-embassy-nrf = { version = "0.9", features = ["nrf52840", "time-driver-rtc1", "unstable-pac", "time"] }
-embassy-sync = { version = "0.7", features = ["defmt"] }
+embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
+embassy-nrf = { version = "0.10", features = ["nrf52840", "time-driver-rtc1", "unstable-pac", "time"] }
+embassy-sync = { version = "0.8", features = ["defmt"] }
 embassy-futures = "0.1"
 embassy-time = { version = "0.5", features = ["defmt"] }
-embassy-net = { version = "0.7", features = ["defmt", "proto-ipv6", "medium-ip", "udp"] }
+embassy-net = { version = "0.8", features = ["defmt", "proto-ipv6", "medium-ip", "udp"] }
 
 defmt = "1"
 defmt-rtt = "1"
