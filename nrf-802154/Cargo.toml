@@ -6,7 +6,7 @@ edition = "2021"
 description = "High level Rust bindings to the NRF 802.15.4 Radio Driver"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sysgrok/nrf-802154"
-rust-version = "1.77"
+rust-version = "1.93"
 
 [package.metadata.docs.rs]
 features = ["nrf52840"]
@@ -33,10 +33,9 @@ log = ["dep:log", "nrf-mpsl/log"]
 [dependencies]
 defmt = { version = "1", optional = true }
 log = { version = "0.4", optional = true }
-openthread = { version = "0.1", optional = true }
+openthread = { version = "0.2", optional = true }
 nrf-mpsl = "0.3"
 nrf-802154-sys = { version = "0.1", path = "../nrf-802154-sys" }
-
 embassy-nrf = { version = "0.10", features = ["unstable-pac"] }
 embassy-sync = "0.8"
 critical-section = "1.2"

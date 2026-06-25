@@ -92,7 +92,7 @@ async fn main(spawner: Spawner) {
 
     let mpsl_p = MpslPeripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
     let mpsl = MPSL.init(MultiprotocolServiceLayer::new(mpsl_p, Irqs, lfclk_cfg).unwrap());
-    spawner.must_spawn(mpsl_task(mpsl));
+    spawner.spawn(mpsl_task(mpsl).unwrap());
 
     let rng = mk_static!(Rng<'static, Blocking>, Rng::new_blocking(p.RNG));
 
@@ -125,11 +125,11 @@ async fn main(spawner: Spawner) {
     let radio = Radio::new(p.RADIO, p.EGU0, Irqs, mpsl, p.TIMER2, p.RTC2);
     let radio = OpenThreadRadio::new(radio);
 
-    spawner.spawn(run_ot(ot.clone(), radio)).unwrap();
+    spawner.spawn(run_ot(ot.clone(), radio).unwrap());
 
     info!("About to spawn OT IP info");
 
-    spawner.spawn(run_ot_info(ot.clone())).unwrap();
+    spawner.spawn(run_ot_info(ot.clone()).unwrap());
 
     info!("Dataset: {}", THREAD_DATASET);
 

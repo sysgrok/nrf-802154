@@ -44,7 +44,7 @@ async fn main(spawner: Spawner) {
 
     let mpsl_p = MpslPeripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
     let mpsl = MPSL.init(MultiprotocolServiceLayer::new(mpsl_p, Irqs, lfclk_cfg).unwrap());
-    spawner.must_spawn(mpsl_task(mpsl));
+    spawner.spawn(mpsl_task(mpsl).unwrap());
 
     let mut radio = Radio::new(p.RADIO, p.EGU0, Irqs, mpsl, p.TIMER2, p.RTC2);
     radio.set_channel(CHANNEL);
