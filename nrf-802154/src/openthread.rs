@@ -80,7 +80,8 @@ impl<'d> OpenThreadRadio<'d> {
 impl openthread::Radio for OpenThreadRadio<'_> {
     type Error = Error;
 
-    const CAPS: openthread::Capabilities = openthread::Capabilities::ACK_TIMEOUT;
+    const CAPS: openthread::Capabilities =
+        openthread::Capabilities::ACK_TIMEOUT.union(openthread::Capabilities::CSMA_BACKOFF);
 
     const MAC_CAPS: openthread::MacCapabilities = openthread::MacCapabilities::all();
 

@@ -422,17 +422,22 @@ impl<'d> Radio<'d> {
             return Err(Error::EnterReceive);
         }
 
-        let status = RadioState::wait(|state| {
-            if let RadioStatus::ReceiveDone(psdu_meta) = state.status {
+        let status = RadioState::wait(|state| match state.status {
+            RadioStatus::ReceiveDone(psdu_meta) => {
                 buf[..psdu_meta.len as usize]
                     .copy_from_slice(&state.rx[1..][..psdu_meta.len as usize]);
+                // Consume the frame by clearing the status, exactly like the
+                // pending-frame fast path above. Without this, the status stays
+                // `ReceiveDone` and the next `receive()` re-delivers this same
+                // `rx` buffer as a phantom duplicate.
+                state.status = RadioStatus::Idle;
+                Some(RadioStatus::ReceiveDone(psdu_meta))
             }
-
-            matches!(
-                state.status,
-                RadioStatus::ReceiveFailed(_) | RadioStatus::ReceiveDone { .. }
-            )
-            .then_some(state.status)
+            RadioStatus::ReceiveFailed(err) => {
+                state.status = RadioStatus::Idle;
+                Some(RadioStatus::ReceiveFailed(err))
+            }
+            _ => None,
         })
         .await;
 
