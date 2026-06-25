@@ -73,6 +73,7 @@ impl<'d> OpenThreadRadio<'d> {
         radio.set_pan_id(config.pan_id);
         radio.set_short_addr(config.short_addr);
         radio.set_ext_addr(config.ext_addr);
+        radio.set_rx_when_idle(config.rx_when_idle);
     }
 }
 

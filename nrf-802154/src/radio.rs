@@ -360,6 +360,17 @@ impl<'d> Radio<'d> {
         }
     }
 
+    /// Set whether the radio should automatically enter receive mode after a transmission or when idle.
+    ///
+    /// # Arguments
+    /// - `rx_when_idle`: If `true`, the radio will automatically enter receive mode after a transmission or when idle.
+    ///   If `false`, the radio will remain in idle mode after a transmission or when idle.
+    pub fn set_rx_when_idle(&mut self, rx_when_idle: bool) {
+        unsafe {
+            raw::nrf_802154_rx_on_when_idle_set(rx_when_idle);
+        }
+    }
+
     /// Move the radio from any state to the DISABLED state
     fn disable(&mut self) {
         // TODO: Is this even supported in the C driver?
