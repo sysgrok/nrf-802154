@@ -6,24 +6,46 @@ edition = "2021"
 description = "Low level Rust bindings to the NRF 802.15.4 Radio Driver"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sysgrok/nrf-802154"
+readme = "README.md"
+keywords = ["nrf", "ieee802154", "thread", "embedded", "no-std"]
+categories = ["embedded", "no-std", "hardware-support", "external-ffi-bindings"]
 rust-version = "1.93"
 
-# TODO: Double-check that the below is good-enough for the 802.15.4 driver build (both bindgen and cmake)
 include = [
     "./*.md",
     "build.rs",
     "src/**",
+    # This crate's own glue headers (`nrfx_glue.h`, freestanding `assert.h`/`string.h`),
+    # referenced via `-I./include` by both bindgen and the cmake build.
+    "include/**",
+    # ARM CMSIS core headers (compiler intrinsics, Cortex-M core + MPU defs) that
+    # the nRF MDK and the driver pull in. The `Core/Include` dir is small (~3 MB).
     "third_party/arm/CMSIS_5/LICENSE.txt",
-    "third_party/arm/CMSIS_5/CMSIS/Core/Include/core_cm4.h",
-    "third_party/arm/CMSIS_5/CMSIS/Core/Include/cmsis_version.h",
-    "third_party/arm/CMSIS_5/CMSIS/Core/Include/cmsis_compiler.h",
-    "third_party/arm/CMSIS_5/CMSIS/Core/Include/cmsis_gcc.h",
-    "third_party/arm/CMSIS_5/CMSIS/Core/Include/mpu_armv7.h",
-    "third_party/arm/CMSIS_5/CMSIS/Core/Include/core_cm33.h",
-    "third_party/arm/CMSIS_5/CMSIS/Core/Include/mpu_armv8.h",
+    "third_party/arm/CMSIS_5/CMSIS/Core/Include/**",
+    # Nordic nrfx. The per-chip `mdk` headers are cherry-picked because the full
+    # `mdk` directory is 200+ MB of definitions for every nRF part; everything
+    # else the driver includes (`nrfx.h`, the HAL, the SoC `coredep`, and the
+    # `nrfx_config` templates) is small and taken whole.
     "third_party/nordic/nrfx/LICENSE",
+    "third_party/nordic/nrfx/*.h",
+    "third_party/nordic/nrfx/drivers/*.h",
+    "third_party/nordic/nrfx/drivers/include/**",
+    "third_party/nordic/nrfx/hal/**",
+    "third_party/nordic/nrfx/haly/**",
+    "third_party/nordic/nrfx/helpers/**",
+    "third_party/nordic/nrfx/soc/**",
+    "third_party/nordic/nrfx/templates/**",
     "third_party/nordic/nrfx/mdk/nrf.h",
+    "third_party/nordic/nrfx/mdk/nrf_peripherals.h",
+    "third_party/nordic/nrfx/mdk/nrf_mem.h",
+    # `nrf_erratas.h` (pulled in by the 802.15.4 driver) unconditionally includes
+    # every chip's errata header, so all must be present (their bodies are
+    # chip-guarded).
+    "third_party/nordic/nrfx/mdk/*_erratas.h",
+    "third_party/nordic/nrfx/mdk/nrf52840_xxaa_memory.h",
+    "third_party/nordic/nrfx/mdk/nrf5340_xxaa_network_memory.h",
     "third_party/nordic/nrfx/mdk/nrf52840.h",
+    "third_party/nordic/nrfx/mdk/nrf52840_peripherals.h",
     "third_party/nordic/nrfx/mdk/system_nrf52840.h",
     "third_party/nordic/nrfx/mdk/nrf52840_bitfields.h",
     "third_party/nordic/nrfx/mdk/nrf51_to_nrf52840.h",
@@ -31,11 +53,17 @@ include = [
     "third_party/nordic/nrfx/mdk/nrf52840_name_change.h",
     "third_party/nordic/nrfx/mdk/compiler_abstraction.h",
     "third_party/nordic/nrfx/mdk/nrf5340_network.h",
+    "third_party/nordic/nrfx/mdk/nrf5340_network_peripherals.h",
     "third_party/nordic/nrfx/mdk/system_nrf5340_network.h",
     "third_party/nordic/nrfx/mdk/nrf5340_network_bitfields.h",
     "third_party/nordic/nrfx/mdk/nrf5340_network_name_change.h",
+    # Nordic nrfxlib: the 802.15.4 driver sources + prebuilt SL static libs
+    # (`nrf_802154/**`), plus the MPSL headers the driver includes under
+    # `-DCONFIG_MPSL`.
     "third_party/nordic/nrfxlib/LICENSE",
-    "third_party/nordic/nrfxlib/nrf-802154/**",
+    "third_party/nordic/nrfxlib/nrf_802154/**",
+    "third_party/nordic/nrfxlib/mpsl/include/**",
+    "third_party/nordic/nrfxlib/mpsl/fem/include/**",
 ]
 
 [package.metadata.docs.rs]

@@ -7,6 +7,4 @@
 
 # nrf-802154-sys
 
-Bindings to Nordic Semiconductor's
-[802.15.4 Radio Driver](https://docs.nordicsemi.com/bundle/ncs-latest/page/nrfxlib/nrf_802154/README.html)
-library for the nRF series of chips.
+Raw bindings to Nordic Semiconductor's [802.15.4 Radio Driver](https://docs.nordicsemi.com/bundle/ncs-latest/page/nrfxlib/nrf_802154/README.html) library for the nRF series of chips.

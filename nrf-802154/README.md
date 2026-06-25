@@ -1,11 +1,11 @@
 [![crates.io](https://img.shields.io/crates/v/nrf-802154.svg)](https://crates.io/crates/nrf-802154)
 [![docs.rs](https://docs.rs/nrf-sdc/badge.svg)](https://docs.rs/nrf-802154)
 
-# nRF 802.15.4 Radio Driver
+# nRF 802.15.4 Radio Driver - WIP
 
-Rust bindings for the Nordic Semiconductor nRF series 802.15.4 C radio driver
+Rust type-safe bindings for the Nordic Semiconductor nRF series 802.15.4 C radio driver.
 
-The 802.154.4 radio driver is an closed-source C library from Nordic Semiconductor that provides a 802.15.4 protocol stack.
+The 802.154.4 radio driver is an open-source C library from Nordic Semiconductor that provides an 802.15.4 protocol stack.
 
 This crate provides high-level, easy-to-use async Rust bindings for the radio driver, which are similar in spirit to the pure Rust ones in `embassy-nrf`.
 
@@ -18,129 +18,86 @@ Unlike the driver in `embassy-nrf`, the C driver provides the following extra fu
  - Enh-ACKs;
  - ... and others. See [this page](https://docs.nordicsemi.com/bundle/ncs-latest/page/nrf/protocols/thread/overview/supported_features.html) for more information.
 
-## Example - TBD
+## Example
 
 The following example shows how to initialize and run the 802.15.4 radio driver in an application.
 
 ```rust
+//! IEEE 802.15.4 packet sniffer.
+//!
+//! This example captures all IEEE 802.15.4 frames on a given channel (default: 15)
+//! and prints the raw frame bytes via defmt/RTT. Run with a RTT viewer to see the output.
+//!
+//! Similar to `receive_all_frames` but outputs raw frame bytes suited for analysis.
+
 #![no_std]
 #![no_main]
-#![feature(type_alias_impl_trait)]
+
+use defmt::info;
 
 use embassy_executor::Spawner;
-use embassy_nrf as _;
-use embassy_nrf::bind_interrupts;
-use embassy_nrf::rng::Rng;
-use nrf_mpsl::{MultiprotocolServiceLayer, Peripherals as MpslPeripherals, raw as mpsl_raw};
-use nrf_sdc::{self as sdc, raw as sdc_raw, SoftdeviceController, Peripherals as SdcPeripherals};
+
+use embedded_alloc::LlffHeap as Heap;
+
+use nrf_802154::Radio;
+use nrf_802154_examples::Irqs;
+use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
+use nrf_mpsl::{MultiprotocolServiceLayer, Peripherals as MpslPeripherals};
+
 use static_cell::StaticCell;
 
-bind_interrupts!(struct Irqs {
-    SWI0_EGU0 => nrf_mpsl::LowPrioInterruptHandler;
-    POWER_CLOCK => nrf_mpsl::ClockInterruptHandler;
-    RADIO => nrf_mpsl::HighPrioInterruptHandler;
-    TIMER0 => nrf_mpsl::HighPrioInterruptHandler;
-    RTC0 => nrf_mpsl::HighPrioInterruptHandler;
-    RNG => embassy_nrf::rng::InterruptHandler<embassy_nrf::peripherals::RNG>;
-});
+use {defmt_rtt as _, panic_probe as _};
 
-#[embassy_executor::main]
-async fn main(spawner: Spawner) -> ! {
-    let p = embassy_nrf::init(Default::default());
+const CHANNEL: u8 = 15;
 
-    // Create the clock configuration
-    let lfclk_cfg = mpsl_raw::mpsl_clock_lfclk_cfg_t {
-        source: mpsl_raw::MPSL_CLOCK_LF_SRC_RC as u8,
-        rc_ctiv: 16,
-        rc_temp_ctiv: 2,
-        accuracy_ppm: mpsl_raw::MPSL_CLOCK_LF_ACCURACY_500_PPM as u16,
-    };
-
-    // On nrf52 chips, the peripherals needed by MPSL are:
-    // RTC0, TIMER0, TEMP, PPI_CH19, PPI_CH30, PPI_CH31
-    // The list of peripherals is different for other chips.
-    let mpsl_p = MpslPeripherals::new(
-        p.RTC0,
-        p.TIMER0,
-        p.TEMP,
-        p.PPI_CH19,
-        p.PPI_CH30,
-        p.PPI_CH31,
-    );
-
-    // Initialize the MPSL
-    static MPSL: StaticCell<MultiprotocolServiceLayer> = StaticCell::new();
-    let mpsl = MPSL.init(MultiprotocolServiceLayer::new(mpsl_p, Irqs, lfclk_cfg).unwrap());
-
-    // On nrf52 chips, the peripherals needed by SDC are:
-    // PPI_CH17, PPI_CH18, PPI_CH20..=PPI_CH29
-    // The list of peripherals is different for other chips.
-    let sdc_p = SdcPeripherals::new(
-        p.PPI_CH17,
-        p.PPI_CH18,
-        p.PPI_CH20,
-        p.PPI_CH21,
-        p.PPI_CH22,
-        p.PPI_CH23,
-        p.PPI_CH24,
-        p.PPI_CH25,
-        p.PPI_CH26,
-        p.PPI_CH27,
-        p.PPI_CH28,
-        p.PPI_CH29,
-    );
-
-    static RNG: StaticCell<Rng<embassy_nrf::peripherals::RNG>> = StaticCell::new();
-    let mut rng = RNG.init(Rng::new(p.RNG, Irqs));
-
-    // The minimum memory required for the SoftDevice Controller to run.
-    const SDC_MEM_SIZE: usize = sdc_raw::SDC_MEM_SIZE_MIN as usize;
-    static SDC_MEM: StaticCell<sdc::Mem<SDC_MEM_SIZE>> = StaticCell::new();
-
-    // Initialize the SoftDevice Controller
-    let sdc = sdc::Builder::new()
-        .unwrap()
-        .support_adv()
-        .unwrap()
-        .support_peripheral()
-        .unwrap()
-        .build(sdc_p, &mut rng, mpsl, SDC_MEM.init(sdc::Mem::new()))
-        .unwrap();
-
-    // Spawn the MPSL and SDC tasks
-    spawner.must_spawn(mpsl_task(mpsl));
-    spawner.must_spawn(sdc_task(sdc));
-
-    // Your application logic can go here.
-    loop {
-        // Do something
-    }
-}
+static MPSL: StaticCell<MultiprotocolServiceLayer<'static>> = StaticCell::new();
 
 #[embassy_executor::task]
-async fn mpsl_task(mpsl: &'static MultiprotocolServiceLayer) -> ! {
+async fn mpsl_task(mpsl: &'static MultiprotocolServiceLayer<'static>) -> ! {
     mpsl.run().await
 }
 
-#[embassy_executor::task]
-async fn sdc_task(sdc: &'static SoftdeviceController) -> ! {
+// Only needed for tinyrlibc's alloc functions which won't be called at runtime.
+//
+// If the firmware would not use or need heap allocation for other purposes, this could be replaced
+// with stub impls of `calloc` and `free` that panic with `unimplemented!()`,
+// and the `#[global_allocator]` attribute could be removed.
+#[global_allocator]
+static HEAP: Heap = Heap::empty();
+
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    let p = embassy_nrf::init(Default::default());
+
+    let lfclk_cfg = mpsl_clock_lfclk_cfg_t {
+        source: nrf_mpsl::raw::MPSL_CLOCK_LF_SRC_RC as u8,
+        rc_ctiv: nrf_mpsl::raw::MPSL_RECOMMENDED_RC_CTIV as u8,
+        rc_temp_ctiv: nrf_mpsl::raw::MPSL_RECOMMENDED_RC_TEMP_CTIV as u8,
+        accuracy_ppm: nrf_mpsl::raw::MPSL_DEFAULT_CLOCK_ACCURACY_PPM as u16,
+        skip_wait_lfclk_started: nrf_mpsl::raw::MPSL_DEFAULT_SKIP_WAIT_LFCLK_STARTED != 0,
+    };
+
+    let mpsl_p = MpslPeripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
+    let mpsl = MPSL.init(MultiprotocolServiceLayer::new(mpsl_p, Irqs, lfclk_cfg).unwrap());
+    spawner.spawn(mpsl_task(mpsl).unwrap());
+
+    let mut radio = Radio::new(p.RADIO, p.EGU0, Irqs, mpsl, p.TIMER2, p.RTC2);
+    radio.set_channel(CHANNEL);
+    radio.set_promiscuous(true);
+
+    info!("Sniffer started on channel {}", CHANNEL);
+
+    let mut buf = [0u8; nrf_802154::MAX_PSDU_SIZE];
     loop {
-        let mut evt_buf = [0; sdc_raw::HCI_MSG_BUFFER_MAX_SIZE as usize];
-        match sdc.hci_get(&mut evt_buf).await {
-            Ok(_event) => {
-                // Handle Bluetooth events
+        match radio.receive(&mut buf).await {
+            Ok(meta) => {
+                info!("@RAW {:?}", &buf[..meta.len as usize]);
             }
             Err(e) => {
-                // Handle errors
-                core::panic!("sdc_task error: {:?}", e)
+                info!("Receive error: {:?}", e);
             }
         }
     }
-}
-
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop {}
 }
 ```
 

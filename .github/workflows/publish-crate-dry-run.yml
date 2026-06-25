@@ -1,0 +1,54 @@
+name: PublishCrateDryRun
+
+on:
+  workflow_dispatch:
+    inputs:
+      crate:
+        required: true
+        type: choice
+        description: Crate to publish
+        options:
+        - nrf-802154-sys
+        - nrf-802154
+
+env:
+  rust_toolchain: "1.93"
+
+jobs:
+  publishdryrun:
+    name: Publish Dry Run
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup | Checkout
+        uses: actions/checkout@v4
+        with:
+          # The `-sys` crate vendors its C sources from git submodules (CMSIS,
+          # nrfx, nrfxlib); they must be checked out so the `include`d files exist
+          # to be packaged.
+          submodules: recursive
+      - name: Setup | Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.rust_toolchain }}
+          # `cargo publish` verifies by building for the default target from
+          # `.cargo/config.toml` (an ARM Cortex-M target), so install it.
+          targets: thumbv7em-none-eabi
+      - name: Build | Publish Dry Run
+        # Both crates are no_std nRF crates: a chip-series feature is mandatory
+        # (the sys build script panics with none) and the build cross-compiles for
+        # an ARM MCU (the target itself comes from `.cargo/config.toml`).
+        run: |
+          cd "${{ github.event.inputs.crate }}"
+          case "${{ github.event.inputs.crate }}" in
+            nrf-802154-sys) cargo publish --dry-run --features nrf52 ;;
+            nrf-802154)     cargo publish --dry-run --features nrf52840 ;;
+          esac
+      - name: Get the crate version from cargo
+        run: |
+          version=$(cargo metadata --format-version=1 --no-deps | jq -r ".packages[] | select(.name == \"${{github.event.inputs.crate}}\") | .version")
+          echo "crate_version=$version" >> $GITHUB_ENV
+          echo "${{github.event.inputs.crate}} version: $version"
+      - name: Tag the new release (dry run)
+        run: |
+          echo "Would create tag: ${{github.event.inputs.crate}}-v${{env.crate_version}}"
+          echo "Would use message: Release ${{github.event.inputs.crate}} v${{env.crate_version}}"

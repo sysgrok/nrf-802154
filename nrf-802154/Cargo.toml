@@ -6,6 +6,9 @@ edition = "2021"
 description = "High level Rust bindings to the NRF 802.15.4 Radio Driver"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sysgrok/nrf-802154"
+readme = "README.md"
+keywords = ["nrf", "ieee802154", "thread", "embedded", "no-std"]
+categories = ["embedded", "no-std", "hardware-support"]
 rust-version = "1.93"
 
 [package.metadata.docs.rs]

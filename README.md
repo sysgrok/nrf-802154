@@ -11,6 +11,20 @@ driver API for the 802.15.4 protocol capabilities of their radio peripheral.
 
 The [SoftDevice Controller](https://github.com/alexmoon/nrf-sdc/tree/main) and the 802.15.4 Radio Driver can co-exist and be operated simulaneously.
 
+## Building from source
+
+This repository vendors the C sources of the 802.15.4 driver via git submodules (Nordic's `nrfx` and
+`nrfxlib`, and ARM's `CMSIS_5`), so they must be checked out before building from a git clone:
+
+```sh
+git clone --recursive https://github.com/sysgrok/nrf-802154
+# ...or, in an already-cloned checkout:
+git submodule update --init --recursive
+```
+
+(The crates published to crates.io bundle the required sources, so this step is only needed when building
+from a git checkout — consumers depending on the published crates do not need it.)
+
 ## High-level bindings
 
 The `nrf-802154` crate contains high-level easy-to-use Rust async/await bindings for the 802.15.4 Radio Driver.
