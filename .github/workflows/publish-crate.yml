@@ -1,0 +1,62 @@
+name: PublishCrate
+
+on:
+  workflow_dispatch:
+    inputs:
+      crate:
+        required: true
+        type: choice
+        description: Crate to publish
+        options:
+        - nrf-802154-sys
+        - nrf-802154
+
+env:
+  rust_toolchain: "1.93"
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    # `contents: write` is required so the "Tag the new release" step can push the
+    # git tag. The default GITHUB_TOKEN is read-only for repos/orgs whose default
+    # workflow permissions are "read", which is why tagging fails today.
+    permissions:
+      contents: write
+    steps:
+      - name: Setup | Checkout
+        uses: actions/checkout@v4
+        with:
+          # The `-sys` crate vendors its C sources from git submodules (CMSIS,
+          # nrfx, nrfxlib); they must be checked out so the `include`d files exist
+          # to be packaged.
+          submodules: recursive
+      - name: Setup | Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.rust_toolchain }}
+          # `cargo publish` verifies by building for the default target from
+          # `.cargo/config.toml` (an ARM Cortex-M target), so install it.
+          targets: thumbv7em-none-eabi
+      - name: Login
+        run: cargo login ${{ secrets.crates_io_token }}
+      - name: Build | Publish
+        # Both crates are no_std nRF crates: a chip-series feature is mandatory
+        # (the sys build script panics with none) and the build cross-compiles for
+        # an ARM MCU (the target itself comes from `.cargo/config.toml`).
+        run: |
+          cd "${{ github.event.inputs.crate }}"
+          case "${{ github.event.inputs.crate }}" in
+            nrf-802154-sys) cargo publish --features nrf52 ;;
+            nrf-802154)     cargo publish --features nrf52840 ;;
+          esac
+      - name: Get the crate version from cargo
+        run: |
+          version=$(cargo metadata --format-version=1 --no-deps | jq -r ".packages[] | select(.name == \"${{github.event.inputs.crate}}\") | .version")
+          echo "crate_version=$version" >> $GITHUB_ENV
+          echo "${{github.event.inputs.crate}} version: $version"
+      - name: Tag the new release
+        uses: rickstaa/action-create-tag@v1
+        with:
+          tag: ${{github.event.inputs.crate}}-v${{env.crate_version}}
+          message: "Release ${{github.event.inputs.crate}} v${{env.crate_version}}"
