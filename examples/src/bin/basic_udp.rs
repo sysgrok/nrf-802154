@@ -15,6 +15,8 @@ use defmt::info;
 
 use embassy_executor::Spawner;
 
+use embassy_time::{Duration, Timer};
+
 use embassy_nrf::mode::Blocking;
 use embassy_nrf::rng::Rng;
 
@@ -120,6 +122,8 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(run_ot_ip_info(ot.clone()).unwrap());
 
+    spawner.spawn(heartbeat(ot.clone()).unwrap());
+
     info!("Dataset: {}", THREAD_DATASET);
 
     ot.set_active_dataset_tlv_hexstr(THREAD_DATASET).unwrap();
@@ -152,6 +156,37 @@ async fn main(spawner: Spawner) {
 #[embassy_executor::task]
 async fn run_ot(ot: OpenThread<'static>, radio: OpenThreadRadio<'static>) -> ! {
     ot.run(radio).await
+}
+
+/// Once-a-second diagnostic heartbeat: device role, OpenThread message-buffer
+/// pool occupancy (the suspected congestion bottleneck), and the radio-layer RX
+/// counters. Watch `free` collapse toward 0 and `reasm` climb under a flood, and
+/// `radio rx` keep climbing throughout (proving the radio stays alive).
+#[embassy_executor::task]
+async fn heartbeat(ot: OpenThread<'static>) -> ! {
+    loop {
+        Timer::after(Duration::from_secs(1)).await;
+
+        let status = ot.net_status();
+        let bi = ot.buffer_info();
+        let d = nrf_802154::rx_stats();
+
+        info!(
+            "HB role={:?} | buf free={}/{} reasm={} | radio rx={} drop={} qlen={} st={} | rxE={} txE={} txS={} txD={}",
+            status.role,
+            bi.free,
+            bi.total,
+            bi.reassembly_buffers,
+            d.received,
+            d.dropped,
+            d.queue_len,
+            d.status,
+            d.rx_enter,
+            d.tx_enter,
+            d.tx_sched,
+            d.tx_done,
+        );
+    }
 }
 
 #[embassy_executor::task]
