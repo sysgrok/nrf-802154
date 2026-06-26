@@ -384,23 +384,22 @@ impl<'d> Radio<'d> {
     ///
     /// # Returns
     /// - `Ok(PsduMeta)` for the next successfully received frame, awaiting one if
-    ///   the RX queue is currently empty
+    ///   no frame is currently buffered
     /// - `Err(Error::EnterReceive)` if the radio could not enter receive mode
     ///
     /// Frame-level reception failures (CRC errors, aborts, ...) are dropped rather
     /// than surfaced as errors: `receive()` simply waits for the next good frame.
     pub async fn receive(&mut self, buf: &mut [u8]) -> Result<PsduMeta, Error> {
-        // Fast path: a frame may already be queued — the C driver auto-enters RX
+        // Fast path: a frame may already be buffered — the C driver auto-enters RX
         // after a transmit (rx_on_when_idle=true), so responses can arrive before
         // the next receive() call. Also clear any stale TX/CCA `status` now that
-        // we're entering the RX phase: RX no longer uses `status` (it uses the
-        // queue), but the next `transmit()` waits for a non-`Transmitting` status,
-        // so a lingering `Transmitting` from the last TX must be cleared here — the
-        // single-buffer implementation relied on this same clearing.
+        // we're entering the RX phase: RX no longer uses `status`, but the next
+        // `transmit()` waits for a non-`Transmitting` status, so a lingering
+        // `Transmitting` from the last TX must be cleared here.
         let pending = STATE.lock(|state| {
             let mut state = state.borrow_mut();
             state.status = RadioStatus::Idle;
-            state.rx_queue.dequeue_into(buf)
+            state.take_rx(buf)
         });
 
         if let Some(meta) = pending {
@@ -413,18 +412,18 @@ impl<'d> Radio<'d> {
             return Err(Error::EnterReceive);
         }
 
-        // Wait until a frame is queued, then drain the oldest one into `buf`.
-        let meta = RadioState::wait(|state| state.rx_queue.dequeue_into(buf)).await;
+        // Wait until a frame is buffered, then drain it into `buf`.
+        let meta = RadioState::wait(|state| state.take_rx(buf)).await;
 
         Ok(meta)
     }
 
-    /// Number of received frames dropped because the RX queue ([`RX_QUEUE_LEN`])
-    /// was full when they arrived. A non-zero value means the stack is draining
-    /// `receive()` too slowly (e.g. the radio task is starved by other work) and
-    /// the queue depth should be increased.
+    /// Number of received frames dropped because the single RX buffer was still
+    /// occupied (not yet drained by `receive()`) when a new frame arrived. A
+    /// non-zero value means the stack is draining `receive()` too slowly (e.g. the
+    /// radio task is starved by other work).
     pub fn rx_dropped(&self) -> u32 {
-        STATE.lock(|state| state.borrow().rx_queue.dropped)
+        STATE.lock(|state| state.borrow().rx_dropped)
     }
 
     /// Transmit one radio packet
@@ -700,95 +699,6 @@ enum TxResult {
     Done(Option<PsduMeta>),
 }
 
-/// Depth of the RX ring buffer, in frames.
-///
-/// Received frames are queued by the `nrf_802154_received*` callbacks and drained
-/// by `receive()`. A queue — rather than a single buffer — is needed because
-/// OpenThread can be slow to call `receive()` when the executor is busy (e.g. when
-/// the radio shares the embassy executor with an `embassy-net` stack). With a
-/// single buffer, a frame arriving before the previous one is read would be
-/// overwritten and lost; the queue retains in-flight frames until the stack drains
-/// them. Increase this if `Radio::rx_dropped()` is non-zero under load.
-const RX_QUEUE_LEN: usize = 16;
-
-/// One queued received frame.
-#[derive(Debug, Clone, Copy)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-struct RxFrame {
-    meta: PsduMeta,
-    /// The raw frame as delivered by the driver: `[PHR, PSDU..]` (the PSDU
-    /// includes the 2-byte FCS). `receive()` hands out `data[1..][..meta.len]`.
-    data: [u8; MAX_PACKET_SIZE],
-}
-
-impl RxFrame {
-    const EMPTY: Self = Self {
-        meta: PsduMeta {
-            len: 0,
-            crc: 0,
-            power: 0,
-            lqi: None,
-            time: None,
-        },
-        data: [0; MAX_PACKET_SIZE],
-    };
-}
-
-/// Fixed-capacity ring buffer of received frames.
-#[derive(Debug)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-struct RxQueue {
-    frames: [RxFrame; RX_QUEUE_LEN],
-    /// Index of the oldest queued frame.
-    head: usize,
-    /// Number of queued frames.
-    len: usize,
-    /// Total frames dropped because the queue was full (saturating-ish, wrapping).
-    dropped: u32,
-}
-
-impl RxQueue {
-    const fn new() -> Self {
-        Self {
-            frames: [RxFrame::EMPTY; RX_QUEUE_LEN],
-            head: 0,
-            len: 0,
-            dropped: 0,
-        }
-    }
-
-    /// Reserve the next free slot and return a mutable reference to fill it, or
-    /// `None` (counting a drop) if the queue is full.
-    fn enqueue_slot(&mut self) -> Option<&mut RxFrame> {
-        if self.len == RX_QUEUE_LEN {
-            self.dropped = self.dropped.wrapping_add(1);
-            return None;
-        }
-
-        let idx = (self.head + self.len) % RX_QUEUE_LEN;
-        self.len += 1;
-        Some(&mut self.frames[idx])
-    }
-
-    /// Pop the oldest frame's PSDU (excluding the PHR) into `buf`, returning its
-    /// metadata, or `None` if the queue is empty.
-    fn dequeue_into(&mut self, buf: &mut [u8]) -> Option<PsduMeta> {
-        if self.len == 0 {
-            return None;
-        }
-
-        let frame = &self.frames[self.head];
-        let len = frame.meta.len as usize;
-        let meta = frame.meta;
-        buf[..len].copy_from_slice(&frame.data[1..][..len]);
-
-        self.head = (self.head + 1) % RX_QUEUE_LEN;
-        self.len -= 1;
-
-        Some(meta)
-    }
-}
-
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 struct RadioState {
@@ -799,11 +709,17 @@ struct RadioState {
     /// `wait_transmit_done` can process it.
     tx_result: Option<TxResult>,
     tx: [u8; MAX_PACKET_SIZE],
-    /// Ring buffer of received frames, filled by the `nrf_802154_received*`
-    /// callbacks and drained by `receive()`.
-    rx_queue: RxQueue,
+    /// Single RX buffer holding the raw frame as delivered by the driver:
+    /// `[PHR, PSDU..]` (the PSDU includes the 2-byte FCS). Filled by the
+    /// `nrf_802154_received*` callbacks, drained by `receive()`.
+    rx: [u8; MAX_PACKET_SIZE],
+    /// Metadata of the frame currently in `rx`, or `None` if the buffer is empty.
+    /// Acts as the "frame pending" flag — RX no longer touches `status`.
+    rx_pending: Option<PsduMeta>,
+    /// Frames dropped because `rx` was still occupied when a new frame arrived.
+    rx_dropped: u32,
     /// Separate buffer for TX ACK data, so `nrf_802154_received_raw` cannot
-    /// overwrite ACK data before `wait_transmit_done` reads it.
+    /// overwrite ACK data in `rx[]` before `wait_transmit_done` reads it.
     ack_rx: [u8; MAX_PACKET_SIZE],
 }
 
@@ -813,9 +729,20 @@ impl RadioState {
             status: RadioStatus::Idle,
             tx_result: None,
             tx: [0; MAX_PACKET_SIZE],
-            rx_queue: RxQueue::new(),
+            rx: [0; MAX_PACKET_SIZE],
+            rx_pending: None,
+            rx_dropped: 0,
             ack_rx: [0; MAX_PACKET_SIZE],
         }
+    }
+
+    /// Drain the pending received frame's PSDU (excluding PHR/FCS) into `buf`,
+    /// returning its metadata, or `None` if no frame is buffered.
+    fn take_rx(&mut self, buf: &mut [u8]) -> Option<PsduMeta> {
+        let meta = self.rx_pending.take()?;
+        let len = meta.len as usize;
+        buf[..len].copy_from_slice(&self.rx[1..][..len]);
+        Some(meta)
     }
 
     async fn wait<F, R>(mut f: F) -> R
@@ -886,18 +813,19 @@ unsafe extern "C" fn nrf_802154_received_raw(p_data: *mut u8, power: i8, lqi: u8
         let total = phr as usize + 1;
 
         if phr >= MIN_PHR && total <= MAX_PACKET_SIZE {
-            if let Some(frame) = state.rx_queue.enqueue_slot() {
-                frame.data[..total]
-                    .copy_from_slice(unsafe { core::slice::from_raw_parts(p_data, total) });
-                frame.meta = PsduMeta {
+            if state.rx_pending.is_none() {
+                state.rx[..total].copy_from_slice(core::slice::from_raw_parts(p_data, total));
+                state.rx_pending = Some(PsduMeta {
                     len: phr - 2, // PHR value - FCS
-                    crc: u16::from_le_bytes([frame.data[total - 2], frame.data[total - 1]]),
+                    crc: u16::from_le_bytes([state.rx[total - 2], state.rx[total - 1]]),
                     power,
                     lqi: Some(lqi),
                     time: None,
-                };
+                });
+            } else {
+                // Buffer still occupied (not yet drained) — drop the new frame.
+                state.rx_dropped = state.rx_dropped.wrapping_add(1);
             }
-            // else: queue full — drop the frame (counted in `rx_queue.dropped`).
         }
         // else: invalid PHR/length — drop silently.
 
@@ -919,18 +847,19 @@ unsafe extern "C" fn nrf_802154_received_timestamp_raw(
         let total = phr as usize + 1;
 
         if phr >= MIN_PHR && total <= MAX_PACKET_SIZE {
-            if let Some(frame) = state.rx_queue.enqueue_slot() {
-                frame.data[..total]
-                    .copy_from_slice(unsafe { core::slice::from_raw_parts(p_data, total) });
-                frame.meta = PsduMeta {
+            if state.rx_pending.is_none() {
+                state.rx[..total].copy_from_slice(core::slice::from_raw_parts(p_data, total));
+                state.rx_pending = Some(PsduMeta {
                     len: phr - 2, // PHR value - FCS
-                    crc: u16::from_le_bytes([frame.data[total - 2], frame.data[total - 1]]),
+                    crc: u16::from_le_bytes([state.rx[total - 2], state.rx[total - 1]]),
                     power,
                     lqi: Some(lqi),
                     time: Some(time),
-                };
+                });
+            } else {
+                // Buffer still occupied (not yet drained) — drop the new frame.
+                state.rx_dropped = state.rx_dropped.wrapping_add(1);
             }
-            // else: queue full — drop the frame (counted in `rx_queue.dropped`).
         }
         // else: invalid PHR/length — drop silently.
 
