@@ -1,13 +1,34 @@
-use crate::{Error, PsduMeta, Radio, MAX_PSDU_SIZE};
+use crate::{Error, PsduMeta, Radio, TxError, MAX_PSDU_SIZE};
 
 impl openthread::RadioError for Error {
     fn kind(&self) -> openthread::RadioErrorKind {
+        use openthread::RadioErrorKind;
+
         match self {
-            Error::TransmitDataTooLarge | Error::ReceiveBufTooSmall => {
-                openthread::RadioErrorKind::Other
-            }
-            Error::ScheduleTransmit | Error::Transmit(_) => openthread::RadioErrorKind::TxFailed,
-            Error::EnterReceive | Error::Receive => openthread::RadioErrorKind::RxFailed,
+            Error::TransmitDataTooLarge | Error::ReceiveBufTooSmall => RadioErrorKind::Other,
+            // Couldn't even hand the frame to the driver (radio busy after the
+            // schedule retries). Treat like a channel-access failure so OpenThread
+            // backs off and retransmits.
+            Error::ScheduleTransmit => RadioErrorKind::TxFailed,
+            Error::Transmit(e) => match e {
+                // CSMA-CA gave up: the channel was still busy after all backoffs.
+                // This is the only TxError that is genuinely a channel-access
+                // failure (`OT_ERROR_CHANNEL_ACCESS_FAILURE`).
+                TxError::BusyChannel => RadioErrorKind::TxFailed,
+                // The frame WENT OUT but no valid ACK came back. These must be
+                // surfaced as NO_ACK (not channel-access) so OpenThread applies its
+                // no-ack retransmission policy. Folding them into `TxFailed` was
+                // mislabeling every no-ack as a `ChannelAccessFailure`.
+                TxError::NoAck => RadioErrorKind::RxAckTimeout,
+                TxError::InvalidAck => RadioErrorKind::RxAckInvalid,
+                // MPSL denied/ended our radio timeslot — no airtime to transmit.
+                // Closest to a channel-access failure; let OpenThread retry.
+                TxError::TimeslotEnded | TxError::TimeslotDenied => RadioErrorKind::TxFailed,
+                // Aborted by another op, out of ACK buffers, or an unknown driver
+                // code: a generic transmit failure (→ `OT_ERROR_ABORT`).
+                TxError::Aborted | TxError::NoMem | TxError::Unknown(_) => RadioErrorKind::Other,
+            },
+            Error::EnterReceive | Error::Receive => RadioErrorKind::RxFailed,
         }
     }
 }
@@ -80,7 +101,19 @@ impl<'d> OpenThreadRadio<'d> {
 impl openthread::Radio for OpenThreadRadio<'_> {
     type Error = Error;
 
-    const CAPS: openthread::Capabilities = openthread::Capabilities::ACK_TIMEOUT;
+    const CAPS: openthread::Capabilities = openthread::Capabilities::ACK_TIMEOUT
+        // Hardware CSMA-CA. Required in practice: OpenThread's software CSMA-CA
+        // timing is too disrupted when the radio shares a busy executor (e.g.
+        // embassy-net), so the attach exchange fails without it.
+        .union(openthread::Capabilities::CSMA_BACKOFF)
+        // The Nordic driver keeps the receiver on when idle (rx_on_when_idle,
+        // forwarded from `Config` in `apply_config`). Advertise it so OpenThread
+        // trusts the radio to stay in RX instead of sleeping it between operations
+        // and re-arming `Receive` — that sleep/re-arm gap drops frames that arrive
+        // asynchronously (routed responses, or Parent Responses when the executor
+        // is busy with e.g. embassy-net), which the RX queue can't recover because
+        // the hardware was off when they arrived.
+        .union(openthread::Capabilities::RX_ON_WHEN_IDLE);
 
     const MAC_CAPS: openthread::MacCapabilities = openthread::MacCapabilities::all();
 
@@ -113,16 +146,21 @@ impl openthread::Radio for OpenThreadRadio<'_> {
             }
         }
 
-        let meta = Radio::transmit(
-            &mut self.radio,
-            &psdu[..psdu.len() - 2],
-            cca,
-            ack_psdu_buf.as_mut().map(|ack_psdu_buf| {
-                let len = ack_psdu_buf.len();
-                &mut ack_psdu_buf[..len - 2]
-            }),
-        )
-        .await?;
+        let data = &psdu[..psdu.len() - 2];
+        let ack = ack_psdu_buf.as_mut().map(|ack_psdu_buf| {
+            let len = ack_psdu_buf.len();
+            &mut ack_psdu_buf[..len - 2]
+        });
+
+        // We advertise `Capabilities::CSMA_BACKOFF`, so OpenThread expects the
+        // radio to perform CSMA-CA channel access itself when it requests it via
+        // `cca`. Route to the driver's CSMA-CA transmit in that case; otherwise
+        // transmit immediately without CCA.
+        let meta = if cca {
+            Radio::transmit_csma_ca(&mut self.radio, data, ack).await?
+        } else {
+            Radio::transmit(&mut self.radio, data, false, ack).await?
+        };
 
         Ok(if let Some(meta) = meta {
             if let Some(ack_psdu_buf) = ack_psdu_buf {

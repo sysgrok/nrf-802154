@@ -383,37 +383,28 @@ impl<'d> Radio<'d> {
     ///   The buffer must be at least `MAX_PSDU_SIZE` bytes long.
     ///
     /// # Returns
-    /// - `Ok(PsduMeta)` if a packet was successfully received
+    /// - `Ok(PsduMeta)` for the next successfully received frame, awaiting one if
+    ///   the RX queue is currently empty
     /// - `Err(Error::EnterReceive)` if the radio could not enter receive mode
-    /// - `Err(Error::Receive)` if the reception failed (CRC error, aborted, etc)
+    ///
+    /// Frame-level reception failures (CRC errors, aborts, ...) are dropped rather
+    /// than surfaced as errors: `receive()` simply waits for the next good frame.
     pub async fn receive(&mut self, buf: &mut [u8]) -> Result<PsduMeta, Error> {
-        // Check for an already-pending received frame before clearing status.
-        // This handles the common case where the C driver auto-enters RX after
-        // a transmit (rx_on_when_idle=true) and a response frame arrives before
-        // the next receive() call. Without this check, the ReceiveDone status
-        // would be cleared, losing the frame.
+        // Fast path: a frame may already be queued — the C driver auto-enters RX
+        // after a transmit (rx_on_when_idle=true), so responses can arrive before
+        // the next receive() call. Also clear any stale TX/CCA `status` now that
+        // we're entering the RX phase: RX no longer uses `status` (it uses the
+        // queue), but the next `transmit()` waits for a non-`Transmitting` status,
+        // so a lingering `Transmitting` from the last TX must be cleared here — the
+        // single-buffer implementation relied on this same clearing.
         let pending = STATE.lock(|state| {
             let mut state = state.borrow_mut();
-            match state.status {
-                RadioStatus::ReceiveDone(psdu_meta) => {
-                    buf[..psdu_meta.len as usize]
-                        .copy_from_slice(&state.rx[1..][..psdu_meta.len as usize]);
-                    state.status = RadioStatus::Idle;
-                    Some(Ok(psdu_meta))
-                }
-                RadioStatus::ReceiveFailed(_) => {
-                    state.status = RadioStatus::Idle;
-                    Some(Err(Error::Receive))
-                }
-                _ => {
-                    state.status = RadioStatus::Idle;
-                    None
-                }
-            }
+            state.status = RadioStatus::Idle;
+            state.rx_queue.dequeue_into(buf)
         });
 
-        if let Some(result) = pending {
-            return result;
+        if let Some(meta) = pending {
+            return Ok(meta);
         }
 
         let receive_entered = unsafe { raw::nrf_802154_receive() };
@@ -422,25 +413,18 @@ impl<'d> Radio<'d> {
             return Err(Error::EnterReceive);
         }
 
-        let status = RadioState::wait(|state| {
-            if let RadioStatus::ReceiveDone(psdu_meta) = state.status {
-                buf[..psdu_meta.len as usize]
-                    .copy_from_slice(&state.rx[1..][..psdu_meta.len as usize]);
-            }
+        // Wait until a frame is queued, then drain the oldest one into `buf`.
+        let meta = RadioState::wait(|state| state.rx_queue.dequeue_into(buf)).await;
 
-            matches!(
-                state.status,
-                RadioStatus::ReceiveFailed(_) | RadioStatus::ReceiveDone { .. }
-            )
-            .then_some(state.status)
-        })
-        .await;
+        Ok(meta)
+    }
 
-        if let RadioStatus::ReceiveDone(details) = status {
-            Ok(details)
-        } else {
-            Err(Error::Receive)
-        }
+    /// Number of received frames dropped because the RX queue ([`RX_QUEUE_LEN`])
+    /// was full when they arrived. A non-zero value means the stack is draining
+    /// `receive()` too slowly (e.g. the radio task is starved by other work) and
+    /// the queue depth should be increased.
+    pub fn rx_dropped(&self) -> u32 {
+        STATE.lock(|state| state.borrow().rx_queue.dropped)
     }
 
     /// Transmit one radio packet
@@ -499,9 +483,16 @@ impl<'d> Radio<'d> {
         });
 
         let metadata = raw::nrf_802154_transmit_metadata_t {
+            // The OpenThread integration never advertises `TRANSMIT_SEC`, so the
+            // stack performs all 802.15.4 MAC security (AES-CCM* encryption + MIC)
+            // and writes the frame counter IN SOFTWARE before handing us the PSDU.
+            // We must tell the driver the frame is already fully prepared, otherwise
+            // it tries to secure it itself, fails to find a stored key for the
+            // frame's key ID, and rejects the TX with `KEY_ID_INVALID`. (For frames
+            // with MAC security disabled these flags are simply ignored.)
             frame_props: raw::nrf_802154_transmitted_frame_props_t {
-                is_secured: false,
-                dynamic_data_is_set: false,
+                is_secured: true,
+                dynamic_data_is_set: true,
             },
             cca,
             tx_power: raw::nrf_802154_tx_power_metadata_t {
@@ -536,6 +527,7 @@ impl<'d> Radio<'d> {
         }
 
         if !scheduled {
+            warn!("nrf_802154 TX could not be scheduled after retries (radio busy)");
             return Err(Error::ScheduleTransmit);
         }
 
@@ -598,27 +590,47 @@ impl<'d> Radio<'d> {
             state.tx_result = None;
         });
 
-        let scheduled = unsafe {
-            raw::nrf_802154_transmit_csma_ca_raw(
-                packet_data,
-                &raw::nrf_802154_transmit_csma_ca_metadata_t {
-                    frame_props: raw::nrf_802154_transmitted_frame_props_t {
-                        is_secured: false,
-                        dynamic_data_is_set: false,
-                    },
-                    tx_power: raw::nrf_802154_tx_power_metadata_t {
-                        use_metadata_value: false,
-                        power: 0,
-                    },
-                    tx_channel: raw::nrf_802154_tx_channel_metadata_t {
-                        use_metadata_value: false,
-                        channel: 0,
-                    },
-                },
-            )
+        let metadata = raw::nrf_802154_transmit_csma_ca_metadata_t {
+            // See the note in `transmit`: OpenThread secures the frame in software
+            // (no `TRANSMIT_SEC` cap), so the PSDU is already encrypted with its
+            // frame counter set. Mark it as such, or the driver attempts its own
+            // security processing and rejects the TX with `KEY_ID_INVALID`.
+            frame_props: raw::nrf_802154_transmitted_frame_props_t {
+                is_secured: true,
+                dynamic_data_is_set: true,
+            },
+            tx_power: raw::nrf_802154_tx_power_metadata_t {
+                use_metadata_value: false,
+                power: 0,
+            },
+            tx_channel: raw::nrf_802154_tx_channel_metadata_t {
+                use_metadata_value: false,
+                channel: 0,
+            },
         };
 
+        // Same scheduling-retry as `transmit()`: `nrf_802154_transmit_csma_ca_raw`
+        // uses TERM_NONE and cannot preempt an in-progress RX/CCA/TX_ACK. With
+        // rx_on_when_idle the receiver is on almost continuously, so a single
+        // attempt frequently fails to schedule — yield to let pending ISRs finish
+        // the current operation, then retry. Without this, the schedule failure is
+        // returned as a TX error that OpenThread reports as `ChannelAccessFailure`,
+        // which is fatal for the back-to-back fragments of large frames.
+        let mut scheduled = false;
+        for _ in 0..TRANSMIT_SCHEDULE_RETRIES {
+            scheduled = unsafe { raw::nrf_802154_transmit_csma_ca_raw(packet_data, &metadata) };
+            if scheduled {
+                break;
+            }
+            core::future::poll_fn(|cx| {
+                cx.waker().wake_by_ref();
+                core::task::Poll::<()>::Pending
+            })
+            .await;
+        }
+
         if !scheduled {
+            warn!("nrf_802154 TX could not be scheduled after retries (radio busy)");
             return Err(Error::ScheduleTransmit);
         }
 
@@ -644,7 +656,11 @@ impl<'d> Radio<'d> {
 
         match tx_result {
             TxResult::Done(psdu_meta) => Ok(psdu_meta),
-            TxResult::Failed(code) => Err(Error::Transmit(TxError::from(code))),
+            TxResult::Failed(code) => {
+                let err = TxError::from(code);
+                warn!("nrf_802154 TX failed: {:?}", err);
+                Err(Error::Transmit(err))
+            }
         }
     }
 }
@@ -669,8 +685,6 @@ impl Drop for Radio<'_> {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 enum RadioStatus {
     Idle,
-    ReceiveFailed(raw::nrf_802154_rx_error_t),
-    ReceiveDone(PsduMeta),
     CcaFailed(raw::nrf_802154_cca_error_t),
     CcaDone(bool),
     EnergyDetectionDetected(i8),
@@ -686,6 +700,95 @@ enum TxResult {
     Done(Option<PsduMeta>),
 }
 
+/// Depth of the RX ring buffer, in frames.
+///
+/// Received frames are queued by the `nrf_802154_received*` callbacks and drained
+/// by `receive()`. A queue — rather than a single buffer — is needed because
+/// OpenThread can be slow to call `receive()` when the executor is busy (e.g. when
+/// the radio shares the embassy executor with an `embassy-net` stack). With a
+/// single buffer, a frame arriving before the previous one is read would be
+/// overwritten and lost; the queue retains in-flight frames until the stack drains
+/// them. Increase this if `Radio::rx_dropped()` is non-zero under load.
+const RX_QUEUE_LEN: usize = 16;
+
+/// One queued received frame.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+struct RxFrame {
+    meta: PsduMeta,
+    /// The raw frame as delivered by the driver: `[PHR, PSDU..]` (the PSDU
+    /// includes the 2-byte FCS). `receive()` hands out `data[1..][..meta.len]`.
+    data: [u8; MAX_PACKET_SIZE],
+}
+
+impl RxFrame {
+    const EMPTY: Self = Self {
+        meta: PsduMeta {
+            len: 0,
+            crc: 0,
+            power: 0,
+            lqi: None,
+            time: None,
+        },
+        data: [0; MAX_PACKET_SIZE],
+    };
+}
+
+/// Fixed-capacity ring buffer of received frames.
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+struct RxQueue {
+    frames: [RxFrame; RX_QUEUE_LEN],
+    /// Index of the oldest queued frame.
+    head: usize,
+    /// Number of queued frames.
+    len: usize,
+    /// Total frames dropped because the queue was full (saturating-ish, wrapping).
+    dropped: u32,
+}
+
+impl RxQueue {
+    const fn new() -> Self {
+        Self {
+            frames: [RxFrame::EMPTY; RX_QUEUE_LEN],
+            head: 0,
+            len: 0,
+            dropped: 0,
+        }
+    }
+
+    /// Reserve the next free slot and return a mutable reference to fill it, or
+    /// `None` (counting a drop) if the queue is full.
+    fn enqueue_slot(&mut self) -> Option<&mut RxFrame> {
+        if self.len == RX_QUEUE_LEN {
+            self.dropped = self.dropped.wrapping_add(1);
+            return None;
+        }
+
+        let idx = (self.head + self.len) % RX_QUEUE_LEN;
+        self.len += 1;
+        Some(&mut self.frames[idx])
+    }
+
+    /// Pop the oldest frame's PSDU (excluding the PHR) into `buf`, returning its
+    /// metadata, or `None` if the queue is empty.
+    fn dequeue_into(&mut self, buf: &mut [u8]) -> Option<PsduMeta> {
+        if self.len == 0 {
+            return None;
+        }
+
+        let frame = &self.frames[self.head];
+        let len = frame.meta.len as usize;
+        let meta = frame.meta;
+        buf[..len].copy_from_slice(&frame.data[1..][..len]);
+
+        self.head = (self.head + 1) % RX_QUEUE_LEN;
+        self.len -= 1;
+
+        Some(meta)
+    }
+}
+
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 struct RadioState {
@@ -696,9 +799,11 @@ struct RadioState {
     /// `wait_transmit_done` can process it.
     tx_result: Option<TxResult>,
     tx: [u8; MAX_PACKET_SIZE],
-    rx: [u8; MAX_PACKET_SIZE],
+    /// Ring buffer of received frames, filled by the `nrf_802154_received*`
+    /// callbacks and drained by `receive()`.
+    rx_queue: RxQueue,
     /// Separate buffer for TX ACK data, so `nrf_802154_received_raw` cannot
-    /// overwrite ACK data in `rx[]` before `wait_transmit_done` reads it.
+    /// overwrite ACK data before `wait_transmit_done` reads it.
     ack_rx: [u8; MAX_PACKET_SIZE],
 }
 
@@ -708,7 +813,7 @@ impl RadioState {
             status: RadioStatus::Idle,
             tx_result: None,
             tx: [0; MAX_PACKET_SIZE],
-            rx: [0; MAX_PACKET_SIZE],
+            rx_queue: RxQueue::new(),
             ack_rx: [0; MAX_PACKET_SIZE],
         }
     }
@@ -781,18 +886,20 @@ unsafe extern "C" fn nrf_802154_received_raw(p_data: *mut u8, power: i8, lqi: u8
         let total = phr as usize + 1;
 
         if phr >= MIN_PHR && total <= MAX_PACKET_SIZE {
-            state.rx[..total].copy_from_slice(core::slice::from_raw_parts(p_data, total));
-
-            state.status = RadioStatus::ReceiveDone(PsduMeta {
-                len: phr - 2, // PHR value - FCS
-                crc: u16::from_le_bytes([state.rx[total - 2], state.rx[total - 1]]),
-                power,
-                lqi: Some(lqi),
-                time: None,
-            });
-        } else {
-            state.status = RadioStatus::ReceiveFailed(raw::NRF_802154_RX_ERROR_INVALID_LENGTH as _);
+            if let Some(frame) = state.rx_queue.enqueue_slot() {
+                frame.data[..total]
+                    .copy_from_slice(unsafe { core::slice::from_raw_parts(p_data, total) });
+                frame.meta = PsduMeta {
+                    len: phr - 2, // PHR value - FCS
+                    crc: u16::from_le_bytes([frame.data[total - 2], frame.data[total - 1]]),
+                    power,
+                    lqi: Some(lqi),
+                    time: None,
+                };
+            }
+            // else: queue full — drop the frame (counted in `rx_queue.dropped`).
         }
+        // else: invalid PHR/length — drop silently.
 
         unsafe {
             raw::nrf_802154_buffer_free_raw(p_data);
@@ -812,18 +919,20 @@ unsafe extern "C" fn nrf_802154_received_timestamp_raw(
         let total = phr as usize + 1;
 
         if phr >= MIN_PHR && total <= MAX_PACKET_SIZE {
-            state.rx[..total].copy_from_slice(core::slice::from_raw_parts(p_data, total));
-
-            state.status = RadioStatus::ReceiveDone(PsduMeta {
-                len: phr - 2, // PHR value - FCS
-                crc: u16::from_le_bytes([state.rx[total - 2], state.rx[total - 1]]),
-                power,
-                lqi: Some(lqi),
-                time: Some(time),
-            });
-        } else {
-            state.status = RadioStatus::ReceiveFailed(raw::NRF_802154_RX_ERROR_INVALID_LENGTH as _);
+            if let Some(frame) = state.rx_queue.enqueue_slot() {
+                frame.data[..total]
+                    .copy_from_slice(unsafe { core::slice::from_raw_parts(p_data, total) });
+                frame.meta = PsduMeta {
+                    len: phr - 2, // PHR value - FCS
+                    crc: u16::from_le_bytes([frame.data[total - 2], frame.data[total - 1]]),
+                    power,
+                    lqi: Some(lqi),
+                    time: Some(time),
+                };
+            }
+            // else: queue full — drop the frame (counted in `rx_queue.dropped`).
         }
+        // else: invalid PHR/length — drop silently.
 
         unsafe {
             raw::nrf_802154_buffer_free_raw(p_data);
@@ -832,8 +941,11 @@ unsafe extern "C" fn nrf_802154_received_timestamp_raw(
 }
 
 #[no_mangle]
-unsafe extern "C" fn nrf_802154_receive_failed(error: raw::nrf_802154_rx_error_t, _id: u32) {
-    RadioState::update(|state| state.status = RadioStatus::ReceiveFailed(error));
+unsafe extern "C" fn nrf_802154_receive_failed(_error: raw::nrf_802154_rx_error_t, _id: u32) {
+    // A frame-level reception failure (CRC error, invalid frame, abort, ...). With
+    // rx_on_when_idle the radio stays in RX, so we just drop the failed reception
+    // and let `receive()` keep waiting for the next good frame, rather than
+    // surfacing transient RX noise to OpenThread as a receive error.
 }
 
 #[no_mangle]
