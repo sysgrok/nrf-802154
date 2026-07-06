@@ -960,8 +960,11 @@ unsafe extern "C" fn nrf_802154_energy_detection_failed(error: raw::nrf_802154_e
 
 #[no_mangle]
 unsafe extern "C" fn nrf_802154_tx_ack_started() {
-    // No-op: this fires from the high-priority radio IRQ (which the
-    // `CriticalSectionRawMutex` does not mask), so it MUST NOT touch the
+    // No-op: unlike the notification callbacks (`received_raw`, `cca_done`,
+    // ... — deferred to the maskable EGU/SWI priority via
+    // `NRF_802154_NOTIFICATION_IMPL=1` in the sys build), this is a *direct*
+    // core callout from the high-priority radio IRQ, which the
+    // `CriticalSectionRawMutex` does not mask. It MUST NOT touch the
     // `RefCell`-protected `RadioState` — doing so races with a `STATE.lock()`
     // held by the executor and panics with "already borrowed". The information
     // (we started auto-ACKing a received frame) isn't needed by the driver.
@@ -1097,8 +1100,9 @@ unsafe extern "C" fn nrf_802154_transmit_failed(
 
 #[no_mangle]
 unsafe extern "C" fn nrf_802154_tx_started(_p_frame: *const u8) {
-    // Runs in the high-priority radio IRQ — use the lock-free `TX_BUSY` flag, not
-    // the `RefCell`-protected `RadioState` (see `TX_BUSY` / `tx_ack_started`).
+    // A *direct* core callout, not a notification (see `tx_ack_started`): runs
+    // in the high-priority radio IRQ, so use the lock-free `TX_BUSY` flag, not
+    // the `RefCell`-protected `RadioState`.
     TX_BUSY.store(true, Ordering::Release);
 }
 
