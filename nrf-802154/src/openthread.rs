@@ -101,21 +101,31 @@ impl<'d> OpenThreadRadio<'d> {
 impl openthread::Radio for OpenThreadRadio<'_> {
     type Error = Error;
 
-    const CAPS: openthread::Capabilities = openthread::Capabilities::ACK_TIMEOUT
-        // Hardware CSMA-CA. Required in practice: OpenThread's software CSMA-CA
-        // timing is too disrupted when the radio shares a busy executor (e.g.
-        // embassy-net), so the attach exchange fails without it.
-        .union(openthread::Capabilities::CSMA_BACKOFF)
-        // The Nordic driver keeps the receiver on when idle (rx_on_when_idle,
-        // forwarded from `Config` in `apply_config`). Advertise it so OpenThread
-        // trusts the radio to stay in RX instead of sleeping it between operations
-        // and re-arming `Receive` — that sleep/re-arm gap drops frames that arrive
-        // asynchronously (routed responses, or Parent Responses when the executor
-        // is busy with e.g. embassy-net), which the RX queue can't recover because
-        // the hardware was off when they arrived.
-        .union(openthread::Capabilities::RX_ON_WHEN_IDLE);
-
-    const MAC_CAPS: openthread::MacCapabilities = openthread::MacCapabilities::all();
+    async fn init(&mut self) -> Result<openthread::RadioCaps, Self::Error> {
+        // Fixed, statically-known capabilities of the Nordic SoC radio (no
+        // hardware handshake needed, unlike a remote-RCP radio).
+        Ok(openthread::RadioCaps {
+            phy: openthread::Capabilities::ACK_TIMEOUT
+                // Hardware CSMA-CA. Required in practice: OpenThread's software
+                // CSMA-CA timing is too disrupted when the radio shares a busy
+                // executor (e.g. embassy-net), so the attach exchange fails
+                // without it.
+                .union(openthread::Capabilities::CSMA_BACKOFF)
+                // The Nordic driver keeps the receiver on when idle
+                // (rx_on_when_idle, forwarded from `Config` in `apply_config`).
+                // Advertise it so OpenThread trusts the radio to stay in RX
+                // instead of sleeping it between operations and re-arming
+                // `Receive` — that sleep/re-arm gap drops frames that arrive
+                // asynchronously (routed responses, or Parent Responses when
+                // the executor is busy with e.g. embassy-net), which the RX
+                // queue can't recover because the hardware was off when they
+                // arrived.
+                .union(openthread::Capabilities::RX_ON_WHEN_IDLE),
+            // Full MAC offload: auto-ACK, address filtering and ACK handling
+            // are done by the Nordic driver/hardware.
+            mac: openthread::MacCapabilities::all(),
+        })
+    }
 
     async fn set_config(&mut self, config: &openthread::Config) -> Result<(), Self::Error> {
         if self.config != *config {
