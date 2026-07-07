@@ -158,7 +158,8 @@ fn bindgen(target: &Target) -> bindgen::Builder {
         .clang_arg("-DCONFIG_MPSL")
         .clang_arg("-DNRF_802154_INTERNAL_SWI_IRQ_HANDLING=0")
         .clang_arg("-DNRF_802154_REQUEST_IMPL=0")
-        .clang_arg("-DNRF_802154_NOTIFICATION_IMPL=0")
+        // SWI notifications — see the CMAKE_C_FLAGS comment in `build()`.
+        .clang_arg("-DNRF_802154_NOTIFICATION_IMPL=1")
         .clang_arg(&nrf_802154_egu_instance_workaround)
         .clang_args(target.core.map(|x| format!("-D{}", x)))
         .clang_args(target.chip_core.map(|x| format!("-D{}", x)))
@@ -211,12 +212,26 @@ fn build(target: &Target) {
         .collect::<Vec<_>>()
         .join(" ");
 
+    // NRF_802154_NOTIFICATION_IMPL=1 (SWI): driver notifications (received /
+    // transmitted / cca / energy-detected / ...) are queued and delivered from
+    // the EGU interrupt at `NRF_802154_SWI_PRIORITY` (4) — a priority that
+    // `critical-section` masks — instead of directly from the zero-latency
+    // radio IRQ, which MPSL requires to stay unmasked even inside critical
+    // sections. Direct delivery (IMPL=0) makes every notification callback
+    // race the executor's `Mutex<RefCell<RadioState>>` borrows ("RefCell
+    // already borrowed" panics under RX load). The SWI handler registers via
+    // `nrf_802154_irq_init` (INTERNAL_SWI_IRQ_HANDLING=0), so it is dispatched
+    // by the `nrf-802154` crate's `Egu0InterruptHandler` on the EGU line
+    // shared with MPSL's low-priority handler. Note that
+    // `nrf_802154_tx_started` / `nrf_802154_tx_ack_started` are direct core
+    // callouts, NOT notifications — they still run in the radio IRQ and must
+    // stay lock-free (see `radio.rs`).
     cmake::Config::new("third_party/nordic/nrfxlib/nrf_802154")
         .define("CMAKE_BUILD_TYPE", "MinSizeRel")
         .define(
             "CMAKE_C_FLAGS",
             format!(
-                "-Werror=implicit-function-declaration -fshort-enums -DCONFIG_MPSL -DNRF_802154_INTERNAL_SWI_IRQ_HANDLING=0 -DNRF_802154_REQUEST_IMPL=0 -DNRF_802154_NOTIFICATION_IMPL=0 {} {} {}",
+                "-Werror=implicit-function-declaration -fshort-enums -DCONFIG_MPSL -DNRF_802154_INTERNAL_SWI_IRQ_HANDLING=0 -DNRF_802154_REQUEST_IMPL=0 -DNRF_802154_NOTIFICATION_IMPL=1 {} {} {}",
                 nrf_802154_egu_instance_workaround, nrf_target_args, include_paths_args
             ),
         )
