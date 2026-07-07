@@ -20,5 +20,5 @@ overflow-checks = false
 
 [patch.crates-io]
 nrf-mpsl = { git = "https://github.com/alexmoon/nrf-sdc", rev = "08620f00fa54e1423c4d54d2da073fb819602d27" }
-# Local openthread for buffer-pool instrumentation (BufferInfo / buffer_info()).
-openthread = { path = "/home/ivan/dev/openthread/openthread" }
+openthread = { git = "https://github.com/esp-rs/openthread" }
+openthread-sys = { git = "https://github.com/esp-rs/openthread" }
