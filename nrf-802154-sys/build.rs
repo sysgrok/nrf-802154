@@ -56,7 +56,11 @@ impl Target {
             (Series::Nrf53, "thumbv8m.main-none-eabi") => (
                 "cortex-m33+nodsp",
                 "soft",
-                "nrf5340",
+                // The prebuilt SL static lib for the nRF5340 lives under the
+                // *network* core directory (`sl/sl/lib/nrf5340_cpunet/`), which is
+                // the core that runs the 802.15.4 radio stack. (`chip_family` is
+                // only used to locate that lib.)
+                "nrf5340_cpunet",
                 "NRF5340_XXAA",
                 Some("NRF_NETWORK"),
                 Some("NRF5340_XXAA_NETWORK"),
@@ -124,6 +128,19 @@ impl Target {
     }
 }
 
+/// Extra preprocessor defines required by some chip series that the nRF-Connect
+/// / Zephyr build normally injects but which are absent in this standalone build.
+///
+/// nRF54L/nRF54H: `nrf_802154_delayed_trx.c` has a `NRF_STATIC_ASSERT` that the
+/// CPU frequency is 128 MHz (the only mode the driver supports on these parts),
+/// referencing `NRF_CONFIG_CPU_FREQ_MHZ` which is otherwise undefined here.
+fn series_extra_defines() -> &'static [&'static str] {
+    match Series::get() {
+        Series::Nrf52 | Series::Nrf53 => &[],
+        Series::Nrf54l | Series::Nrf54lNs | Series::Nrf54h => &["-DNRF_CONFIG_CPU_FREQ_MHZ=128"],
+    }
+}
+
 fn bindgen(target: &Target) -> bindgen::Builder {
     // NOTE:
     // This is a terrible hack for (seemingly)
@@ -161,6 +178,7 @@ fn bindgen(target: &Target) -> bindgen::Builder {
         // SWI notifications — see the CMAKE_C_FLAGS comment in `build()`.
         .clang_arg("-DNRF_802154_NOTIFICATION_IMPL=1")
         .clang_arg(&nrf_802154_egu_instance_workaround)
+        .clang_args(series_extra_defines().iter().copied())
         .clang_args(target.core.map(|x| format!("-D{}", x)))
         .clang_args(target.chip_core.map(|x| format!("-D{}", x)))
         .prepend_enum_name(false)
@@ -206,6 +224,7 @@ fn build(target: &Target) {
         .into_iter()
         .chain(std::iter::once(format!("-D{}", target.chip)))
         .chain(target.chip_core.map(|x| format!("-D{}", x)))
+        .chain(series_extra_defines().iter().map(|s| s.to_string()))
         .chain(std::iter::once(format!("-mcpu={}", target.cpu)))
         .chain(std::iter::once(format!("-mfloat-abi={}", target.float_abi)))
         .chain(std::iter::once("-mthumb".to_string()))
