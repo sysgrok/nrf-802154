@@ -2,7 +2,7 @@
 [![crates.io](https://img.shields.io/crates/v/nrf-802154.svg)](https://crates.io/crates/nrf-802154)
 [![Matrix](https://img.shields.io/matrix/rs-matter:matrix.org?label=join%20matrix&color=BEC5C9&logo=matrix)](https://matrix.to/#/#rs-matter:matrix.org)
 
-# nRF 802.15.4 Radio Driver - WIP
+# nRF 802.15.4 Radio Driver
 
 Rust type-safe bindings for the Nordic Semiconductor nRF series 802.15.4 C radio driver.
 
