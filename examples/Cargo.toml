@@ -41,9 +41,17 @@ name = "srp"
 path = "src/bin/srp.rs"
 harness = false
 
+[[bin]]
+name = "srp_ble_coex"
+path = "src/bin/srp_ble_coex.rs"
+harness = false
+
 [dependencies]
 nrf-802154 = { path = "../nrf-802154", version = "0.1", features = ["nrf52840", "defmt", "openthread"] }
 nrf-mpsl = { version = "0.3.0", features = ["nrf52840", "critical-section-impl"] }
+nrf-sdc = { version = "0.4.0", features = ["nrf52840", "peripheral", "defmt"] }
+trouble-host = { version = "0.6", default-features = false, features = ["defmt", "gatt", "peripheral", "default-packet-pool"] }
+bt-hci = { version = "0.8", features = ["defmt"] }
 
 openthread = { version = "0.2", features = ["udp", "srp", "embassy-net-driver-channel", "defmt"] }
 tinyrlibc = { version = "0.5", default-features = false, features = ["alloc", "strstr", "strcmp", "isupper", "utoa", "strtoul"] }
