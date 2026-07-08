@@ -38,6 +38,9 @@ include = [
     "third_party/nordic/nrfx/mdk/nrf.h",
     "third_party/nordic/nrfx/mdk/nrf_peripherals.h",
     "third_party/nordic/nrfx/mdk/nrf_mem.h",
+    # Generic system header that the nRF54 chip headers route through
+    # (`system_nrf<series>.h` then dispatches per chip).
+    "third_party/nordic/nrfx/mdk/system_nrf.h",
     # `nrf_erratas.h` (pulled in by the 802.15.4 driver) unconditionally includes
     # every chip's errata header, so all must be present (their bodies are
     # chip-guarded).
@@ -57,6 +60,37 @@ include = [
     "third_party/nordic/nrfx/mdk/system_nrf5340_network.h",
     "third_party/nordic/nrfx/mdk/nrf5340_network_bitfields.h",
     "third_party/nordic/nrfx/mdk/nrf5340_network_name_change.h",
+    # nRF54L15 (nrf54l-s / nrf54l-ns): the per-chip headers pulled in by `nrf.h`
+    # for the `NRF54L15_XXAA` application core (determined by tracing the driver
+    # build's header opens).
+    "third_party/nordic/nrfx/mdk/nrf54l15.h",
+    "third_party/nordic/nrfx/mdk/nrf54l15_types.h",
+    "third_party/nordic/nrfx/mdk/nrf54l15_global.h",
+    "third_party/nordic/nrfx/mdk/nrf54l15_interim.h",
+    "third_party/nordic/nrfx/mdk/nrf54l15_name_change.h",
+    "third_party/nordic/nrfx/mdk/nrf54l15_peripherals.h",
+    "third_party/nordic/nrfx/mdk/nrf54l15_application.h",
+    "third_party/nordic/nrfx/mdk/nrf54l15_application_peripherals.h",
+    "third_party/nordic/nrfx/mdk/nrf54l15_flpr.h",
+    "third_party/nordic/nrfx/mdk/nrf54l15_xxaa_application_memory.h",
+    "third_party/nordic/nrfx/mdk/system_nrf54l.h",
+    # nRF54H20 (nrf54h): per-chip headers for the `NRF54H20_XXAA` radio core.
+    "third_party/nordic/nrfx/mdk/nrf54h20.h",
+    "third_party/nordic/nrfx/mdk/nrf54h20_types.h",
+    "third_party/nordic/nrfx/mdk/nrf54h20_global.h",
+    "third_party/nordic/nrfx/mdk/nrf54h20_interim.h",
+    "third_party/nordic/nrfx/mdk/nrf54h20_name_change.h",
+    "third_party/nordic/nrfx/mdk/nrf54h20_peripherals.h",
+    "third_party/nordic/nrfx/mdk/nrf54h20_radiocore.h",
+    "third_party/nordic/nrfx/mdk/nrf54h20_radiocore_peripherals.h",
+    "third_party/nordic/nrfx/mdk/nrf54h20_application.h",
+    "third_party/nordic/nrfx/mdk/nrf54h20_flpr.h",
+    "third_party/nordic/nrfx/mdk/nrf54h20_ppr.h",
+    "third_party/nordic/nrfx/mdk/nrf54h20_xxaa_radiocore_memory.h",
+    "third_party/nordic/nrfx/mdk/system_nrf54h.h",
+    # nRF54H20 `_interim.h` pulls in the shared "haltium" (nRF54H family codename)
+    # interim header.
+    "third_party/nordic/nrfx/mdk/haltium_interim.h",
     # Nordic nrfxlib: the 802.15.4 driver sources + prebuilt SL static libs
     # (`nrf_802154/**`), plus the MPSL headers the driver includes under
     # `-DCONFIG_MPSL`.
