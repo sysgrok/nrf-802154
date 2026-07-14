@@ -166,7 +166,19 @@ fn bindgen(target: &Target) -> bindgen::Builder {
         .clang_arg("-I./third_party/arm/CMSIS_5/CMSIS/Core/Include")
         .clang_arg("-I./include")
         .clang_arg("-I./third_party/nordic/nrfx")
-        .clang_arg("-I./third_party/nordic/nrfx/mdk")
+        // nrfx 4.x relocated the MDK (`nrf.h`, per-chip headers) under
+        // `bsp/stable/mdk` and added the BSP layer (`nrfx_bsp.h`, `nrfx_ext.h`,
+        // `soc/*`). This `bsp/stable{,/soc,/mdk}` triplet must stay identical to
+        // the one in nrf-sdc's `nrf-mpsl-sys`/`nrf-sdc-sys` build.rs so that both
+        // sibling crates compile nrfx the same way on the shared MPSL.
+        .clang_arg("-I./third_party/nordic/nrfx/bsp/stable")
+        .clang_arg("-I./third_party/nordic/nrfx/bsp/stable/soc")
+        .clang_arg("-I./third_party/nordic/nrfx/bsp/stable/mdk")
+        // Per-chip nrfx config templates (`nrfx_config_nrf<chip>.h`,
+        // `nrfx_templates_config.h`) — pulled in by our `include/nrfx_config.h`
+        // to get the unsuffixed peripheral aliases (e.g. `NRF_RADIO` on nRF5340
+        // network core). See `include/nrfx_config.h`.
+        .clang_arg("-I./third_party/nordic/nrfx/bsp/stable/templates")
         .clang_arg("-I./third_party/nordic/nrfxlib/nrf_802154/common/include")
         .clang_arg("-I./third_party/nordic/nrfxlib/nrf_802154/driver/include")
         .clang_arg("-I./third_party/nordic/nrfxlib/nrf_802154/sl/include")
@@ -191,7 +203,15 @@ fn build(target: &Target) {
         "third_party/arm/CMSIS_5/CMSIS/Core/Include",
         "include",
         "third_party/nordic/nrfx",
-        "third_party/nordic/nrfx/mdk",
+        // nrfx 4.x: MDK moved to `bsp/stable/mdk`, plus the new BSP layer under
+        // `bsp/stable` (see the bindgen include-path comment above). Keep this
+        // triplet identical to nrf-sdc's sibling sys crates.
+        "third_party/nordic/nrfx/bsp/stable",
+        "third_party/nordic/nrfx/bsp/stable/soc",
+        "third_party/nordic/nrfx/bsp/stable/mdk",
+        // Per-chip nrfx config templates — see the bindgen include-path comment
+        // and `include/nrfx_config.h`.
+        "third_party/nordic/nrfx/bsp/stable/templates",
         "third_party/nordic/nrfxlib/mpsl/include",
         "third_party/nordic/nrfxlib/mpsl/fem/include",
         "third_party/nordic/nrfxlib/nrf_802154/sl/sl/include",

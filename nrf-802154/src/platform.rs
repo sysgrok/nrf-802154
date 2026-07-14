@@ -177,18 +177,23 @@ fn hp_timer() -> pac::timer::Timer {
     }
 }
 
-#[no_mangle]
-extern "C" fn nrf_802154_clock_hfclk_latency_set(_latency: u32) {}
+// `nrf_802154_clock_hfclk_latency_set` is intentionally NOT defined here.
+//
+// Up to nrfxlib v3.1.1 the SL library only defined this (empty) function under
+// `#ifdef NRF54L_SERIES`, so on nRF52/nRF53 the platform had to supply it. As of
+// nrfxlib v3.3.0 the SL library (`nrf_802154_sl_rsch.c`) defines it
+// unconditionally for all chips, so a Rust `#[no_mangle]` stub here would be a
+// duplicate symbol at link time. Let the C own it.
 
 #[no_mangle]
 extern "C" fn nrf_802154_hp_timer_init() {
     let timer = hp_timer();
     timer
         .mode()
-        .write(|w| w.set_mode(pac::timer::vals::Mode::TIMER));
+        .write(|w| w.set_mode(pac::timer::vals::Mode::Timer));
     timer
         .bitmode()
-        .write(|w| w.set_bitmode(pac::timer::vals::Bitmode::_32BIT));
+        .write(|w| w.set_bitmode(pac::timer::vals::Bitmode::_32bit));
     // Prescaler = 4 -> 16 MHz / 2^4 = 1 MHz -> 1µs resolution
     timer.prescaler().write(|w| w.set_prescaler(4));
 }

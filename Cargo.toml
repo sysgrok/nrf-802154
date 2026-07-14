@@ -19,7 +19,8 @@ opt-level = 'z'
 overflow-checks = false
 
 [patch.crates-io]
-nrf-mpsl = { git = "https://github.com/alexmoon/nrf-sdc", rev = "08620f00fa54e1423c4d54d2da073fb819602d27" }
-nrf-sdc = { git = "https://github.com/alexmoon/nrf-sdc", rev = "08620f00fa54e1423c4d54d2da073fb819602d27" }
+nrf-mpsl = { git = "https://github.com/alexmoon/nrf-sdc", rev = "f54b6389ffa2750d4d3a4f5435660cb66b47e51a" }
+nrf-sdc = { git = "https://github.com/alexmoon/nrf-sdc", rev = "f54b6389ffa2750d4d3a4f5435660cb66b47e51a" }
 openthread = { git = "https://github.com/esp-rs/openthread" }
 openthread-sys = { git = "https://github.com/esp-rs/openthread" }
+trouble-host = { git = "https://github.com/alexmoon/trouble", branch = "no-controller-generic" }
