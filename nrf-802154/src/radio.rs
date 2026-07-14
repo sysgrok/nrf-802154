@@ -508,6 +508,9 @@ impl<'d> Radio<'d> {
                 use_metadata_value: false,
                 channel: 0,
             },
+            // Requires NRF_802154_TX_TIMESTAMP_PROVIDER_ENABLED (which we don't
+            // enable); leaving it false keeps the pre-nrfx-4 behavior.
+            tx_timestamp_encode: false,
         };
 
         // nrf_802154_transmit_raw uses TERM_NONE, which cannot abort in-progress
@@ -518,7 +521,10 @@ impl<'d> Radio<'d> {
         // the C driver's state machine to advance and complete the blocking operation.
         let mut scheduled = false;
         for _ in 0..TRANSMIT_SCHEDULE_RETRIES {
-            scheduled = unsafe { raw::nrf_802154_transmit_raw(packet_data, &metadata) };
+            // nrfx 4.x: transmit_raw now returns nrf_802154_tx_error_t (u8) instead
+            // of a bool; NRF_802154_TX_ERROR_NONE (0) means the TX was scheduled.
+            let err = unsafe { raw::nrf_802154_transmit_raw(packet_data, &metadata) };
+            scheduled = u32::from(err) == raw::NRF_802154_TX_ERROR_NONE;
             if scheduled {
                 break;
             }
@@ -616,6 +622,9 @@ impl<'d> Radio<'d> {
                 use_metadata_value: false,
                 channel: 0,
             },
+            // Requires NRF_802154_TX_TIMESTAMP_PROVIDER_ENABLED (which we don't
+            // enable); leaving it false keeps the pre-nrfx-4 behavior.
+            tx_timestamp_encode: false,
         };
 
         // Same scheduling-retry as `transmit()`: `nrf_802154_transmit_csma_ca_raw`
@@ -627,7 +636,10 @@ impl<'d> Radio<'d> {
         // which is fatal for the back-to-back fragments of large frames.
         let mut scheduled = false;
         for _ in 0..TRANSMIT_SCHEDULE_RETRIES {
-            scheduled = unsafe { raw::nrf_802154_transmit_csma_ca_raw(packet_data, &metadata) };
+            // nrfx 4.x: transmit_csma_ca_raw now returns nrf_802154_tx_error_t (u8)
+            // instead of a bool; NRF_802154_TX_ERROR_NONE (0) means scheduled.
+            let err = unsafe { raw::nrf_802154_transmit_csma_ca_raw(packet_data, &metadata) };
+            scheduled = u32::from(err) == raw::NRF_802154_TX_ERROR_NONE;
             if scheduled {
                 break;
             }
