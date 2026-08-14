@@ -47,7 +47,7 @@ use embedded_alloc::LlffHeap as Heap;
 use nrf_802154::{OpenThreadRadio, Radio};
 use nrf_802154_tests::{console, settings, Irqs};
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
-use nrf_mpsl::{Flash, MultiprotocolServiceLayer, Peripherals as MpslPeripherals};
+use nrf_mpsl::{Flash, MultiprotocolServiceLayer, Peripherals as MpslPeripherals, SessionMem};
 
 use openthread::{OpenThread, OtResources};
 
@@ -95,7 +95,20 @@ async fn main(spawner: Spawner) {
     };
 
     let mpsl_p = MpslPeripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
-    let mpsl = MPSL.init(MultiprotocolServiceLayer::new(mpsl_p, Irqs, lfclk_cfg).unwrap());
+    // `with_timeslots` rather than `new`: the flash driver schedules its
+    // erases/writes as MPSL timeslots, and without session memory allocated
+    // here, every `Flash` operation fails at `mpsl_timeslot_session_open` -
+    // which silently degrades the settings to RAM-only (see `settings`).
+    // One session: the flash driver opens a single session per operation.
+    let mpsl = MPSL.init(
+        MultiprotocolServiceLayer::with_timeslots(
+            mpsl_p,
+            Irqs,
+            lfclk_cfg,
+            mk_static!(SessionMem<1>, SessionMem::new()),
+        )
+        .unwrap(),
+    );
     spawner.spawn(run_mpsl(mpsl).unwrap());
 
     // Flash access must be MPSL-coordinated (it runs in radio-free

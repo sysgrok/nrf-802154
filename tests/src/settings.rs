@@ -162,6 +162,7 @@ impl Settings for FlashSettings {
     }
 
     fn add(&mut self, key: u16, value: &[u8]) -> Result<(), SettingsError> {
+        defmt::debug!("Settings: add key {} len {}", key, value.len());
         self.state.with_ram(|ram| Settings::add(ram, key, value))?;
         self.state.mark_dirty();
         Ok(())
@@ -178,12 +179,14 @@ impl Settings for FlashSettings {
     }
 
     fn set(&mut self, key: u16, value: &[u8]) -> Result<(), SettingsError> {
+        defmt::debug!("Settings: set key {} len {}", key, value.len());
         self.state.with_ram(|ram| Settings::set(ram, key, value))?;
         self.state.mark_dirty();
         Ok(())
     }
 
     fn clear(&mut self) -> Result<(), SettingsError> {
+        defmt::debug!("Settings: clear");
         self.state.with_ram(Settings::clear)?;
         self.state.mark_dirty();
         Ok(())
@@ -207,6 +210,7 @@ pub async fn run(state: &'static FlashSettingsState, mut flash: Flash<'static>, 
         let dirty_gen = state.dirty_gen.load(Ordering::Relaxed);
 
         let len = state.with_ram(|ram| serialize(ram, &mut img));
+        defmt::debug!("Settings: persisting gen {} image len {}", dirty_gen, len);
 
         // NVMC writes are word-granular; the pad bytes never parse, as the
         // length field bounds them out.
@@ -221,6 +225,7 @@ pub async fn run(state: &'static FlashSettingsState, mut flash: Flash<'static>, 
             defmt::warn!("Settings: flash write failed; settings not persisted");
         }
 
+        defmt::debug!("Settings: persisted gen {} ok {}", dirty_gen, done);
         state.persisted_gen.store(dirty_gen, Ordering::Relaxed);
         state.persisted.signal(());
     }
