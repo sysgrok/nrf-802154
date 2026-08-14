@@ -776,7 +776,17 @@ impl<'d> Radio<'d> {
             TxResult::Done(psdu_meta) => Ok(psdu_meta),
             TxResult::Failed(code) => {
                 let err = TxError::from(code);
-                warn!("nrf_802154 TX failed: {:?}", err);
+                match err {
+                    // Routine air-level outcomes - the peer missed the frame,
+                    // or CSMA-CA lost the channel - which the MAC-layer
+                    // retransmission policy exists to absorb. Not warnings,
+                    // but a burst of them is the first thing to look at when
+                    // debugging link quality.
+                    TxError::NoAck | TxError::BusyChannel => {
+                        trace!("nrf_802154 TX failed: {:?}", err);
+                    }
+                    _ => warn!("nrf_802154 TX failed: {:?}", err),
+                }
                 Err(Error::Transmit(err))
             }
         }
