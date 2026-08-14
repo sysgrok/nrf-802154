@@ -4,6 +4,7 @@ members = [
     "nrf-802154-sys",
     "nrf-802154",
     "examples",
+    "tests",
 ]
 
 [profile.dev]
