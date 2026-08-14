@@ -29,6 +29,7 @@ impl openthread::RadioError for Error {
                 TxError::Aborted | TxError::NoMem | TxError::Unknown(_) => RadioErrorKind::Other,
             },
             Error::EnterReceive | Error::Receive => RadioErrorKind::RxFailed,
+            Error::EnterSleep => RadioErrorKind::Other,
         }
     }
 }
@@ -72,6 +73,7 @@ pub struct OpenThreadRadio<'d> {
     radio: Radio<'d>,
     config: openthread::Config,
     power: i8,
+    cca_threshold: Option<i8>,
 }
 
 impl<'d> OpenThreadRadio<'d> {
@@ -86,20 +88,15 @@ impl<'d> OpenThreadRadio<'d> {
             radio,
             config,
             power,
+            // The C driver's PIB default: Energy Detection at -75 dBm - which
+            // is also OpenThread's own default threshold.
+            cca_threshold: Some(-75),
         }
     }
 
     fn apply_config(radio: &mut Radio<'_>, config: &openthread::Config) {
-        // CCA is intentionally NOT configured here (and the per-transmit
-        // `cca_threshold` is not forwarded either, see `transmit`).
-        // The Nordic 802.15.4 C driver's PIB defaults (Energy Detection at
-        // -75 dBm, set during nrf_802154_pib_init) are well-tested and IEEE
-        // 802.15.4 compliant - and -75 dBm is also OpenThread's own default
-        // threshold, so there is nothing to forward in practice. (The driver's
-        // `Cca::Ed` takes a raw 0..0xFF ED sample, not dBm, so forwarding a
-        // dBm threshold would also need the Product Specification conversion.)
-        // Users can still override CCA via `Radio::set_cca()` before wrapping
-        // with `OpenThreadRadio` if needed.
+        // CCA is per-transmit: OpenThread's threshold arrives with each frame
+        // and is applied there (see `transmit`).
         radio.set_promiscuous(config.promiscuous);
         radio.set_pan_id(config.pan_id);
         radio.set_short_addr(config.short_addr);
@@ -137,19 +134,11 @@ impl openthread::Radio for OpenThreadRadio<'_> {
                 // The transmit power arrives per-transmit and is applied
                 // before each frame (see `transmit`).
                 .union(openthread::Capabilities::TRANSMIT_FRAME_POWER),
-            // Full MAC offload - auto-ACK, address filtering and ACK handling
-            // are done by the Nordic driver/hardware - EXCEPT the
-            // source-match table: the C driver has an ACK-data/pending-bit
-            // API, but this crate's `Radio` does not expose it yet, so the
-            // ACKs answering data polls do not consult the table (see
-            // `set_src_match_config`). `SRC_MATCH` is exactly the capability
-            // the `openthread` crate documents as droppable in this
-            // situation.
-            //
-            // TODO: Expose `nrf_802154_ack_data_*` in `Radio` and claim
-            // `SRC_MATCH`.
-            mac: openthread::MacCapabilities::all()
-                .difference(openthread::MacCapabilities::SRC_MATCH),
+            // Full MAC offload: auto-ACK, address filtering, ACK handling
+            // and the source-match table (the ACKs' pending bit consults the
+            // driver's pending-bit lists, see `set_src_match_config`) are all
+            // done by the Nordic driver/hardware.
+            mac: openthread::MacCapabilities::all(),
             // The Nordic OT platform's receive-sensitivity figure for this
             // radio.
             receive_sensitivity: -100,
@@ -172,34 +161,54 @@ impl openthread::Radio for OpenThreadRadio<'_> {
 
     async fn set_src_match_config(
         &mut self,
-        _config: &openthread::SrcMatchConfig,
+        config: &openthread::SrcMatchConfig,
     ) -> Result<(), Self::Error> {
-        // Not forwarded: the wrapped `Radio` does not expose the C driver's
-        // ACK-data/pending-bit API (yet), which is why `SRC_MATCH` is not
-        // claimed in `init` - OpenThread then expects every data poll to be
-        // ACKed with Frame Pending set, which is the C driver's default
-        // behavior with no ACK data configured.
+        // The table is small and changes rarely (children with pending
+        // indirect frames), so rebuild it wholesale instead of diffing.
+        self.radio.clear_pending();
+
+        for &addr in &config.short_addrs {
+            // A full driver list (`NRF_802154_PENDING_SHORT_ADDRESSES`) drops
+            // the overflowing child to FP = 0. The `openthread` glue already
+            // caps the table at its own capacity by answering `NO_BUFS`, which
+            // makes OpenThread fall back to FP-on-every-ACK - so overflow here
+            // means the driver list is configured smaller than that cap.
+            self.radio.set_pending_short(addr, true);
+        }
+
+        for &addr in &config.ext_addrs {
+            self.radio.set_pending_ext(addr, true);
+        }
+
+        // Disabled matching = pending bit set in every ACK, which is exactly
+        // the `SrcMatchConfig::enabled == false` contract.
+        self.radio.set_src_match_enabled(config.enabled);
+
         Ok(())
     }
 
     async fn set_receive(&mut self, channel: u8) -> Result<(), Self::Error> {
-        // Only the channel: reception itself runs driver-side (IRQ-fed RX
-        // queue), gated by the rx-when-idle policy from `apply_config`.
         if self.radio.channel() != channel {
             self.radio.set_channel(channel);
+        }
+
+        // Wake the receiver (the counterpart of `set_sleep`); reception
+        // itself runs driver-side, into the IRQ-fed RX queue.
+        if !self.radio.enter_receive() {
+            return Err(Error::EnterReceive);
         }
 
         Ok(())
     }
 
     async fn set_sleep(&mut self) -> Result<(), Self::Error> {
-        // TODO: Not forwarded - the wrapped `Radio` does not expose the C
-        // driver's sleep entry point. Until it does, the receiver stays on
-        // while OpenThread believes this node is asleep, so a sleepy end
-        // device neither saves the power it parked for, nor genuinely misses
-        // the traffic the stack assumes it missed (see the `openthread`
-        // repo's `docs/radio-contract.md`, C6) - frames keep accumulating in
-        // the driver queue and are delivered late on the next `receive`.
+        // The receiver goes off, so frames sent to a sleeping node are
+        // genuinely missed, as the radio contract requires; frames already
+        // in the RX queue were received while awake and remain deliverable.
+        if !self.radio.sleep() {
+            return Err(Error::EnterSleep);
+        }
+
         Ok(())
     }
 
@@ -241,11 +250,15 @@ impl openthread::Radio for OpenThreadRadio<'_> {
 
         // We advertise `Capabilities::CSMA_BACKOFF`, so OpenThread expects the
         // radio to perform CSMA-CA channel access itself when it requests it
-        // (a `Some` threshold). Route to the driver's CSMA-CA transmit in that
-        // case - at the PIB's own ED threshold, see `apply_config` on why the
-        // dBm value is not forwarded - and transmit immediately without CCA
-        // otherwise.
-        let meta = if cca_threshold.is_some() {
+        // (a `Some` threshold). Route to the driver's CSMA-CA transmit in
+        // that case - as Energy Detection at the requested dBm threshold -
+        // and transmit immediately without CCA otherwise.
+        let meta = if let Some(threshold) = cca_threshold {
+            if self.cca_threshold != Some(threshold) {
+                self.cca_threshold = Some(threshold);
+                self.radio.set_cca(crate::Cca::ed_from_dbm(threshold));
+            }
+
             Radio::transmit_csma_ca(&mut self.radio, data, ack).await?
         } else {
             Radio::transmit(&mut self.radio, data, false, ack).await?
