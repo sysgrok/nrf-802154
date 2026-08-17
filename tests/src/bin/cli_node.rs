@@ -247,11 +247,17 @@ async fn run_cli(ot: OpenThread<'static>, mut console_rx: ConsoleRx) -> ! {
                     // rebooting - that is what makes either reset durable.
                     "reset" => {
                         settings::flush(&SETTINGS_STATE).await;
+                        // Drain before rebooting, or the reply races the
+                        // reset: whether it reaches the wire comes down to how
+                        // long the flush happened to take, and the harness is
+                        // left waiting on a response that was never sent.
+                        console::drained().await;
                         cortex_m::peripheral::SCB::sys_reset()
                     }
                     "factoryreset" => {
                         let _ = ot.cli_input_line(line);
                         settings::flush(&SETTINGS_STATE).await;
+                        console::drained().await;
                         cortex_m::peripheral::SCB::sys_reset()
                     }
                     "" => (),
@@ -285,6 +291,8 @@ async fn run_console_out(mut console_tx: ConsoleTx) -> ! {
         console_tx.wait_connection().await;
 
         let len = console::read_out(&mut buf).await;
+        // No await between taking the bytes and claiming them - see `tx_begin`.
+        console::tx_begin();
 
         // Write *all* of it: a buffered write reports how many bytes it took,
         // and a burst larger than the TX ring buffer is accepted in pieces.
@@ -299,6 +307,11 @@ async fn run_console_out(mut console_tx: ConsoleTx) -> ! {
                     Ok(n) => sent += n,
                 }
             }
+
+            // Past the ring buffer and onto the wire. Without this, `drained`
+            // would report bytes delivered while they are still queued, and a
+            // reset following a reply would truncate it.
+            let _ = console_tx.flush().await;
         }
 
         #[cfg(feature = "nrf52840")]
@@ -330,6 +343,8 @@ async fn run_console_out(mut console_tx: ConsoleTx) -> ! {
                 let _ = embassy_time::with_timeout(TX_STALL, console_tx.write_packet(&[])).await;
             }
         }
+
+        console::tx_end();
     }
 }
 

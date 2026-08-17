@@ -44,9 +44,7 @@ static HEAP: Heap = Heap::empty();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    info!("boot");
     let p = nrf_802154_examples::init();
-    info!("embassy init done");
 
     let lfclk_cfg = mpsl_clock_lfclk_cfg_t {
         source: nrf_mpsl::raw::MPSL_CLOCK_LF_SRC_RC as u8,
@@ -58,7 +56,6 @@ async fn main(spawner: Spawner) {
 
     let mpsl_p = nrf_802154_examples::mpsl_peripherals!(p);
     let mpsl = MPSL.init(MultiprotocolServiceLayer::new(mpsl_p, Irqs, lfclk_cfg).unwrap());
-    info!("mpsl up");
     spawner.spawn(mpsl_task(mpsl).unwrap());
 
     let mut radio = Radio::new(
@@ -67,7 +64,6 @@ async fn main(spawner: Spawner) {
         Irqs,
         mpsl,
     );
-    info!("radio up");
     radio.set_channel(CHANNEL);
     radio.set_pan_id(Some(PAN_ID));
     radio.set_short_addr(Some(SHORT_ADDR));
