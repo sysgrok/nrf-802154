@@ -26,3 +26,26 @@ jobs:
         run: cargo +nightly fmt -- --check
       - name: Checks
         run: ./ci.sh
+      # Release builds (workspace profile: opt-level=z, fat LTO) feeding the
+      # flash/RAM size reports below. `cli_node` is already built in release
+      # by ci.sh.
+      - name: Build examples (release, for size reporting)
+        run: cargo build -p nrf-802154-examples --release --target thumbv7em-none-eabi
+      - name: Set up environment for size reports
+        uses: ./.github/actions/setup-size-reports
+        if: ${{ !env.ACT }}
+        with:
+          gh-context: ${{ toJson(github) }}
+      - name: Prepare bloat report from the previous builds
+        run: |
+          for bin in receive_frame receive_all_frames send_frame send_broadcast_frame sniffer basic_udp basic_enet srp srp_ble_coex cli_node; do
+            python .github/scripts/memory/gh_sizes.py \
+              nrf52_$bin defmtlogs-optz-ltofat thumbv7em-none-eabi \
+              target/thumbv7em-none-eabi/release/$bin \
+              /tmp/bloat_reports/
+          done
+      - name: Uploading Size Reports
+        uses: ./.github/actions/upload-size-reports
+        if: ${{ !env.ACT }}
+        with:
+          platform-name: nrf52

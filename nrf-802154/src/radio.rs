@@ -84,6 +84,8 @@ pub enum Error {
     ScheduleTransmit,
     /// Could not enter receive mode
     EnterReceive,
+    /// Could not enter sleep mode
+    EnterSleep,
     /// Transmission failed
     Transmit(TxError),
     /// Reception failed (CRC error, aborted, etc)
@@ -124,6 +126,16 @@ pub enum Cca {
         /// for details.
         ed_threshold: u8,
     },
+}
+
+impl Cca {
+    /// An Energy Detection CCA with its threshold given in dBm, converted to
+    /// the hardware's raw 0..0xFF ED scale by the C driver's own helper.
+    pub fn ed_from_dbm(dbm: i8) -> Self {
+        Self::Ed {
+            ed_threshold: unsafe { raw::nrf_802154_ccaedthres_from_dbm_calculate(dbm) },
+        }
+    }
 }
 
 /// Details of a received frame
@@ -218,6 +230,11 @@ impl<'d> Radio<'d> {
         unsafe {
             raw::nrf_802154_channel_set(11);
             raw::nrf_802154_tx_power_set(0);
+            // The Thread flavor of pending-bit source matching (see
+            // `set_src_match_enabled`); explicit, though it is the default.
+            raw::nrf_802154_src_addr_matching_method_set(
+                raw::NRF_802154_SRC_ADDR_MATCH_THREAD as _,
+            );
             // CCA defaults are set by nrf_802154_pib_init() during nrf_802154_init():
             //   mode = NRF_RADIO_CCA_MODE_ED (Energy Detection)
             //   ed_threshold = -75 dBm
@@ -372,6 +389,82 @@ impl<'d> Radio<'d> {
         }
     }
 
+    /// Move the radio to the SLEEP state: the receiver is off and nothing is
+    /// received until [`enter_receive`](Self::enter_receive) (or an operation
+    /// that implies it) brings it back.
+    ///
+    /// Frames already in the RX queue stay there - they were received while
+    /// awake and are still owed to the caller.
+    ///
+    /// Returns `false` if the driver refused the transition (an operation is
+    /// in progress).
+    pub fn sleep(&mut self) -> bool {
+        unsafe { raw::nrf_802154_sleep() }
+    }
+
+    /// Move the radio to the RECEIVE state (the counterpart of
+    /// [`sleep`](Self::sleep); [`receive`](Self::receive) also enters it on
+    /// its own).
+    ///
+    /// Returns `false` if the driver refused the transition.
+    pub fn enter_receive(&mut self) -> bool {
+        unsafe { raw::nrf_802154_receive() }
+    }
+
+    /// Enable or disable source-address matching for the pending bit of
+    /// automatically transmitted ACK frames.
+    ///
+    /// Enabled: an ACK's pending bit is set only when the frame's source
+    /// address is in the pending-bit list (see
+    /// [`set_pending_short`](Self::set_pending_short) /
+    /// [`set_pending_ext`](Self::set_pending_ext)). Disabled: the pending bit
+    /// is set in every ACK - the protocol-safe over-promise.
+    pub fn set_src_match_enabled(&mut self, enabled: bool) {
+        unsafe {
+            raw::nrf_802154_auto_pending_bit_set(enabled);
+        }
+    }
+
+    /// Add (or remove) a short address to the ACK pending-bit list.
+    ///
+    /// Returns `false` when adding failed because the list is full
+    /// (`NRF_802154_PENDING_SHORT_ADDRESSES`).
+    pub fn set_pending_short(&mut self, addr: u16, pending: bool) -> bool {
+        let addr = addr.to_le_bytes();
+
+        unsafe {
+            if pending {
+                raw::nrf_802154_pending_bit_for_addr_set(addr.as_ptr(), false)
+            } else {
+                raw::nrf_802154_pending_bit_for_addr_clear(addr.as_ptr(), false)
+            }
+        }
+    }
+
+    /// Add (or remove) an extended address to the ACK pending-bit list.
+    ///
+    /// Returns `false` when adding failed because the list is full
+    /// (`NRF_802154_PENDING_EXTENDED_ADDRESSES`).
+    pub fn set_pending_ext(&mut self, addr: u64, pending: bool) -> bool {
+        let addr = addr.to_le_bytes();
+
+        unsafe {
+            if pending {
+                raw::nrf_802154_pending_bit_for_addr_set(addr.as_ptr(), true)
+            } else {
+                raw::nrf_802154_pending_bit_for_addr_clear(addr.as_ptr(), true)
+            }
+        }
+    }
+
+    /// Empty both (short and extended) ACK pending-bit lists.
+    pub fn clear_pending(&mut self) {
+        unsafe {
+            raw::nrf_802154_pending_bit_for_addr_reset(false);
+            raw::nrf_802154_pending_bit_for_addr_reset(true);
+        }
+    }
+
     /// Move the radio from any state to the DISABLED state
     fn disable(&mut self) {
         // TODO: Is this even supported in the C driver?
@@ -508,6 +601,9 @@ impl<'d> Radio<'d> {
                 use_metadata_value: false,
                 channel: 0,
             },
+            // Requires NRF_802154_TX_TIMESTAMP_PROVIDER_ENABLED (which we don't
+            // enable); leaving it false keeps the pre-nrfx-4 behavior.
+            tx_timestamp_encode: false,
         };
 
         // nrf_802154_transmit_raw uses TERM_NONE, which cannot abort in-progress
@@ -518,7 +614,10 @@ impl<'d> Radio<'d> {
         // the C driver's state machine to advance and complete the blocking operation.
         let mut scheduled = false;
         for _ in 0..TRANSMIT_SCHEDULE_RETRIES {
-            scheduled = unsafe { raw::nrf_802154_transmit_raw(packet_data, &metadata) };
+            // nrfx 4.x: transmit_raw now returns nrf_802154_tx_error_t (u8) instead
+            // of a bool; NRF_802154_TX_ERROR_NONE (0) means the TX was scheduled.
+            let err = unsafe { raw::nrf_802154_transmit_raw(packet_data, &metadata) };
+            scheduled = u32::from(err) == raw::NRF_802154_TX_ERROR_NONE;
             if scheduled {
                 break;
             }
@@ -616,6 +715,9 @@ impl<'d> Radio<'d> {
                 use_metadata_value: false,
                 channel: 0,
             },
+            // Requires NRF_802154_TX_TIMESTAMP_PROVIDER_ENABLED (which we don't
+            // enable); leaving it false keeps the pre-nrfx-4 behavior.
+            tx_timestamp_encode: false,
         };
 
         // Same scheduling-retry as `transmit()`: `nrf_802154_transmit_csma_ca_raw`
@@ -627,7 +729,10 @@ impl<'d> Radio<'d> {
         // which is fatal for the back-to-back fragments of large frames.
         let mut scheduled = false;
         for _ in 0..TRANSMIT_SCHEDULE_RETRIES {
-            scheduled = unsafe { raw::nrf_802154_transmit_csma_ca_raw(packet_data, &metadata) };
+            // nrfx 4.x: transmit_csma_ca_raw now returns nrf_802154_tx_error_t (u8)
+            // instead of a bool; NRF_802154_TX_ERROR_NONE (0) means scheduled.
+            let err = unsafe { raw::nrf_802154_transmit_csma_ca_raw(packet_data, &metadata) };
+            scheduled = u32::from(err) == raw::NRF_802154_TX_ERROR_NONE;
             if scheduled {
                 break;
             }
@@ -671,7 +776,17 @@ impl<'d> Radio<'d> {
             TxResult::Done(psdu_meta) => Ok(psdu_meta),
             TxResult::Failed(code) => {
                 let err = TxError::from(code);
-                warn!("nrf_802154 TX failed: {:?}", err);
+                match err {
+                    // Routine air-level outcomes - the peer missed the frame,
+                    // or CSMA-CA lost the channel - which the MAC-layer
+                    // retransmission policy exists to absorb. Not warnings,
+                    // but a burst of them is the first thing to look at when
+                    // debugging link quality.
+                    TxError::NoAck | TxError::BusyChannel => {
+                        trace!("nrf_802154 TX failed: {:?}", err);
+                    }
+                    _ => warn!("nrf_802154 TX failed: {:?}", err),
+                }
                 Err(Error::Transmit(err))
             }
         }

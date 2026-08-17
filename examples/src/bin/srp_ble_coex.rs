@@ -236,15 +236,16 @@ async fn main(spawner: Spawner) {
 async fn pin_ble(controller: sdc::SoftdeviceController<'_>, address: Address) -> ! {
     let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
         HostResources::new();
-    let stack = trouble_host::new(controller, &mut resources).set_random_address(address);
-    let Host {
-        mut peripheral,
-        runner,
-        ..
-    } = stack.build();
+    // trouble-host 0.7: `build()` returns the `Stack` itself; the peripheral,
+    // central and runner are obtained via accessor methods that borrow it
+    // (previously `build()` returned a destructurable `Host { .. }`).
+    let stack = trouble_host::new(controller, &mut resources)
+        .set_random_address(address)
+        .build();
+    let mut peripheral = stack.peripheral();
+    let mut runner = stack.runner();
 
     let ble_bg = async {
-        let mut runner = runner;
         loop {
             if let Err(e) = runner.run().await {
                 warn!("BLE runner error: {:?}", defmt::Debug2Format(&e));
