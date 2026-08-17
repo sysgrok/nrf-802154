@@ -85,6 +85,19 @@ include = [
     "third_party/nordic/nrfx/bsp/stable/mdk/nrf54l15_flpr.h",
     "third_party/nordic/nrfx/bsp/stable/mdk/nrf54l15_xxaa_application_memory.h",
     "third_party/nordic/nrfx/bsp/stable/mdk/system_nrf54l.h",
+    # nRF54LM20A (nrf54lm20-s): same series, but its own per-chip headers,
+    # because `CCM00` — which the driver's encryption accelerator path writes
+    # to — sits at a different address than on the nRF54L15.
+    "third_party/nordic/nrfx/bsp/stable/mdk/nrf54lm20a.h",
+    "third_party/nordic/nrfx/bsp/stable/mdk/nrf54lm20a_types.h",
+    "third_party/nordic/nrfx/bsp/stable/mdk/nrf54lm20a_global.h",
+    "third_party/nordic/nrfx/bsp/stable/mdk/nrf54lm20a_interim.h",
+    "third_party/nordic/nrfx/bsp/stable/mdk/nrf54lm20a_name_change.h",
+    "third_party/nordic/nrfx/bsp/stable/mdk/nrf54lm20a_peripherals.h",
+    "third_party/nordic/nrfx/bsp/stable/mdk/nrf54lm20a_application.h",
+    "third_party/nordic/nrfx/bsp/stable/mdk/nrf54lm20a_application_peripherals.h",
+    "third_party/nordic/nrfx/bsp/stable/mdk/nrf54lm20a_flpr.h",
+    "third_party/nordic/nrfx/bsp/stable/mdk/nrf54lm20a_xxaa_application_memory.h",
     # nRF54H20 (nrf54h): per-chip headers for the `NRF54H20_XXAA` radio core.
     "third_party/nordic/nrfx/bsp/stable/mdk/nrf54h20.h",
     "third_party/nordic/nrfx/bsp/stable/mdk/nrf54h20_types.h",
@@ -125,6 +138,7 @@ nrf52 = []
 nrf53 = []
 nrf54l-ns = []
 nrf54l-s = []
+nrf54lm20-s = []
 nrf54h = []
 
 #[dependencies]

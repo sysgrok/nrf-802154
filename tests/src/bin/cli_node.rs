@@ -35,19 +35,26 @@
 
 use embassy_executor::Spawner;
 
-use embassy_nrf::mode::Blocking;
-use embassy_nrf::rng::Rng;
+#[cfg(feature = "nrf54l15")]
+use embassy_nrf::buffered_uarte::{BufferedUarte, BufferedUarteRx, BufferedUarteTx};
+#[cfg(feature = "nrf54l15")]
+use embassy_nrf::peripherals;
+#[cfg(feature = "nrf54l15")]
+use embassy_nrf::uarte;
+#[cfg(feature = "nrf52840")]
 use embassy_nrf::{peripherals, usb};
 
+#[cfg(feature = "nrf52840")]
 use embassy_usb::class::cdc_acm::{self, CdcAcmClass};
+#[cfg(feature = "nrf52840")]
 use embassy_usb::UsbDevice;
 
 use embedded_alloc::LlffHeap as Heap;
 
 use nrf_802154::{OpenThreadRadio, Radio};
-use nrf_802154_tests::{console, settings, Irqs};
+use nrf_802154_tests::{console, ieee_eui64, settings, Irqs, Rng};
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
-use nrf_mpsl::{Flash, MultiprotocolServiceLayer, Peripherals as MpslPeripherals, SessionMem};
+use nrf_mpsl::{Flash, MultiprotocolServiceLayer, SessionMem};
 
 use openthread::{OpenThread, OtResources};
 
@@ -68,12 +75,26 @@ macro_rules! mk_static {
 
 /// The flash page `memory.x` carves off the top of the application region -
 /// out of the linker's FLASH, so the firmware can never grow into it.
+#[cfg(feature = "nrf52840")]
 const SETTINGS_OFFSET: u32 = 0x000f_f000;
+/// The RRAM page `memory.x` carves off the top of the application region.
+#[cfg(feature = "nrf54l15")]
+const SETTINGS_OFFSET: u32 = 0x0017_c000;
 
 /// The console's two ends: the board's own USB peripheral (CDC-ACM).
+#[cfg(feature = "nrf52840")]
 type UsbDriver = usb::Driver<'static, &'static usb::vbus_detect::SoftwareVbusDetect>;
+#[cfg(feature = "nrf52840")]
 type ConsoleTx = cdc_acm::Sender<'static, UsbDriver>;
+#[cfg(feature = "nrf52840")]
 type ConsoleRx = cdc_acm::Receiver<'static, UsbDriver>;
+
+/// The console's two ends: UART20, which the board's onboard CMSIS-DAP probe
+/// bridges to a USB CDC port on the host.
+#[cfg(feature = "nrf54l15")]
+type ConsoleTx = BufferedUarteTx<'static, peripherals::SERIAL20>;
+#[cfg(feature = "nrf54l15")]
+type ConsoleRx = BufferedUarteRx<'static, peripherals::SERIAL20>;
 
 static MPSL: StaticCell<MultiprotocolServiceLayer<'static>> = StaticCell::new();
 static SETTINGS_STATE: settings::FlashSettingsState = settings::FlashSettingsState::new();
@@ -84,7 +105,7 @@ static HEAP: Heap = Heap::empty();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let p = embassy_nrf::init(Default::default());
+    let p = nrf_802154_tests::init();
 
     let lfclk_cfg = mpsl_clock_lfclk_cfg_t {
         source: nrf_mpsl::raw::MPSL_CLOCK_LF_SRC_RC as u8,
@@ -94,7 +115,7 @@ async fn main(spawner: Spawner) {
         skip_wait_lfclk_started: nrf_mpsl::raw::MPSL_DEFAULT_SKIP_WAIT_LFCLK_STARTED != 0,
     };
 
-    let mpsl_p = MpslPeripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
+    let mpsl_p = nrf_802154_tests::mpsl_peripherals!(p);
     // `with_timeslots` rather than `new`: the flash driver schedules its
     // erases/writes as MPSL timeslots, and without session memory allocated
     // here, every `Flash` operation fails at `mpsl_timeslot_session_open` -
@@ -114,7 +135,7 @@ async fn main(spawner: Spawner) {
     // Flash access must be MPSL-coordinated (it runs in radio-free
     // timeslots), which is what makes settings persistence write-behind -
     // see `settings`.
-    let mut flash = Flash::take(mpsl, p.NVMC);
+    let mut flash = Flash::take(mpsl, nrf_802154_tests::flash_peripheral!(p));
 
     let ot_settings_buf = mk_static!([u8; 1024], [0; 1024]);
     let ot_settings = mk_static!(
@@ -129,7 +150,7 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(run_settings(flash).unwrap());
 
-    let rng = mk_static!(Rng<'static, Blocking>, Rng::new_blocking(p.RNG));
+    let rng = mk_static!(Rng<'static>, nrf_802154_tests::rng!(p));
 
     let ieee_eui64 = ieee_eui64();
 
@@ -138,11 +159,49 @@ async fn main(spawner: Spawner) {
 
     // The full-MAC radio goes straight to the stack: no software MAC, no
     // executor split.
-    let radio = OpenThreadRadio::new(Radio::new(p.RADIO, p.EGU0, Irqs, mpsl, p.TIMER2, p.RTC2));
+    let radio = OpenThreadRadio::new(Radio::new(
+        p.RADIO,
+        nrf_802154_tests::radio_peripherals!(p),
+        Irqs,
+        mpsl,
+    ));
     spawner.spawn(run_ot(ot.clone(), radio).unwrap());
 
-    let (console_tx, console_rx, usb) = build_usb_console(p.USBD);
-    spawner.spawn(run_usb(usb).unwrap());
+    #[cfg(feature = "nrf52840")]
+    let (console_tx, console_rx) = {
+        let (console_tx, console_rx, usb) = build_usb_console(p.USBD);
+        spawner.spawn(run_usb(usb).unwrap());
+        (console_tx, console_rx)
+    };
+
+    #[cfg(feature = "nrf54l15")]
+    let (console_tx, console_rx) = {
+        let mut uarte_config = uarte::Config::default();
+        uarte_config.baudrate = uarte::Baudrate::Baud115200;
+        uarte_config.parity = uarte::Parity::Excluded;
+
+        // Buffered, not the raw `Uarte`: a raw `UarteRx::read` only arms
+        // EasyDMA for the duration of the call, so every byte that arrives
+        // while the node is echoing the previous one is lost - which the
+        // harness sees as commands mangled into `InvalidCommand`. The
+        // buffered driver keeps RX armed into a ring buffer instead.
+        //
+        // UART20, as the onboard CMSIS-DAP probe bridges it: nRF TX on P1.09,
+        // nRF RX on P1.08. The constructor takes rxd before txd.
+        let (console_rx, console_tx) = BufferedUarte::new(
+            p.SERIAL20,
+            p.P1_08,
+            p.P1_09,
+            Irqs,
+            uarte_config,
+            mk_static!([u8; 1024], [0; 1024]),
+            mk_static!([u8; 1024], [0; 1024]),
+        )
+        .split();
+        // `split` hands back rx first.
+        (console_tx, console_rx)
+    };
+
     spawner.spawn(run_console_out(console_tx).unwrap());
 
     ot.cli_init(console::out);
@@ -162,8 +221,17 @@ async fn run_cli(ot: OpenThread<'static>, mut console_rx: ConsoleRx) -> ! {
     let mut buf = [0; 64];
 
     loop {
-        console_rx.wait_connection().await;
-        let Ok(len) = console_rx.read_packet(&mut buf).await else {
+        // USB is packetized and only readable while the host has the port
+        // open; the UART is a plain byte stream, one byte at a time.
+        #[cfg(feature = "nrf52840")]
+        let read = {
+            console_rx.wait_connection().await;
+            console_rx.read_packet(&mut buf).await
+        };
+        #[cfg(feature = "nrf54l15")]
+        let read = console_rx.read(&mut buf).await;
+
+        let Ok(len) = read else {
             continue;
         };
 
@@ -213,39 +281,59 @@ async fn run_console_out(mut console_tx: ConsoleTx) -> ! {
     let mut buf = [0; 512];
 
     loop {
+        #[cfg(feature = "nrf52840")]
         console_tx.wait_connection().await;
 
         let len = console::read_out(&mut buf).await;
 
-        // How long a packet write may sit unaccepted before the output is
-        // dropped. Generous next to USB speeds, so it only fires when nobody
-        // is reading at all.
-        const TX_STALL: embassy_time::Duration = embassy_time::Duration::from_millis(500);
-
-        // One packet per `write_packet` - it does not split - and a
-        // zero-length packet after a final full-size one: a bulk transfer
-        // only ends on a *short* packet. The writes are bounded because the
-        // host may not be reading at all; blocking forever would back up
-        // `drained` and the command loop with it. (See the `openthread`
-        // repo's nRF node for the full story.)
-        let mps = console_tx.max_packet_size() as usize;
-
-        let mut sent = 0;
-        while sent < len {
-            let chunk = &buf[sent..(sent + mps).min(len)];
-
-            match embassy_time::with_timeout(TX_STALL, console_tx.write_packet(chunk)).await {
-                Ok(Ok(())) => sent += chunk.len(),
-                _ => break,
+        // Write *all* of it: a buffered write reports how many bytes it took,
+        // and a burst larger than the TX ring buffer is accepted in pieces.
+        // Discarding that count truncates CLI output mid-line, which the
+        // harness sees as a command that never finished answering.
+        #[cfg(feature = "nrf54l15")]
+        {
+            let mut sent = 0;
+            while sent < len {
+                match console_tx.write(&buf[sent..len]).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => sent += n,
+                }
             }
         }
 
-        if sent == len && sent % mps == 0 {
-            let _ = embassy_time::with_timeout(TX_STALL, console_tx.write_packet(&[])).await;
+        #[cfg(feature = "nrf52840")]
+        {
+            // How long a packet write may sit unaccepted before the output is
+            // dropped. Generous next to USB speeds, so it only fires when nobody
+            // is reading at all.
+            const TX_STALL: embassy_time::Duration = embassy_time::Duration::from_millis(500);
+
+            // One packet per `write_packet` - it does not split - and a
+            // zero-length packet after a final full-size one: a bulk transfer
+            // only ends on a *short* packet. The writes are bounded because the
+            // host may not be reading at all; blocking forever would back up
+            // `drained` and the command loop with it. (See the `openthread`
+            // repo's nRF node for the full story.)
+            let mps = console_tx.max_packet_size() as usize;
+
+            let mut sent = 0;
+            while sent < len {
+                let chunk = &buf[sent..(sent + mps).min(len)];
+
+                match embassy_time::with_timeout(TX_STALL, console_tx.write_packet(chunk)).await {
+                    Ok(Ok(())) => sent += chunk.len(),
+                    _ => break,
+                }
+            }
+
+            if sent == len && sent % mps == 0 {
+                let _ = embassy_time::with_timeout(TX_STALL, console_tx.write_packet(&[])).await;
+            }
         }
     }
 }
 
+#[cfg(feature = "nrf52840")]
 /// Build the USB CDC console: the board's own USB peripheral presented to
 /// the host as a serial port.
 ///
@@ -290,23 +378,6 @@ fn build_usb_console(
     (console_tx, console_rx, usb)
 }
 
-/// The chip's factory device address, as an EUI-64.
-fn ieee_eui64() -> [u8; 8] {
-    let ficr = embassy_nrf::pac::FICR;
-
-    let low = ficr.deviceaddr(0).read();
-    let high = ficr.deviceaddr(1).read();
-
-    let mut eui64 = [0; 8];
-    eui64[..4].copy_from_slice(&low.to_be_bytes());
-    eui64[4..].copy_from_slice(&high.to_be_bytes());
-
-    // Locally administered, unicast - this is a device address, not an OUI one.
-    eui64[0] = (eui64[0] & 0xfe) | 0x02;
-
-    eui64
-}
-
 #[embassy_executor::task]
 async fn run_mpsl(mpsl: &'static MultiprotocolServiceLayer<'static>) -> ! {
     mpsl.run().await
@@ -317,6 +388,7 @@ async fn run_settings(flash: Flash<'static>) -> ! {
     settings::run(&SETTINGS_STATE, flash, SETTINGS_OFFSET).await
 }
 
+#[cfg(feature = "nrf52840")]
 #[embassy_executor::task]
 async fn run_usb(mut usb: UsbDevice<'static, UsbDriver>) -> ! {
     usb.run().await

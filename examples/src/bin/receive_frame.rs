@@ -17,7 +17,7 @@ use embedded_alloc::LlffHeap as Heap;
 use nrf_802154::Radio;
 use nrf_802154_examples::Irqs;
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
-use nrf_mpsl::{MultiprotocolServiceLayer, Peripherals as MpslPeripherals};
+use nrf_mpsl::MultiprotocolServiceLayer;
 
 use static_cell::StaticCell;
 
@@ -44,7 +44,9 @@ static HEAP: Heap = Heap::empty();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let p = embassy_nrf::init(Default::default());
+    info!("boot");
+    let p = nrf_802154_examples::init();
+    info!("embassy init done");
 
     let lfclk_cfg = mpsl_clock_lfclk_cfg_t {
         source: nrf_mpsl::raw::MPSL_CLOCK_LF_SRC_RC as u8,
@@ -54,11 +56,18 @@ async fn main(spawner: Spawner) {
         skip_wait_lfclk_started: nrf_mpsl::raw::MPSL_DEFAULT_SKIP_WAIT_LFCLK_STARTED != 0,
     };
 
-    let mpsl_p = MpslPeripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
+    let mpsl_p = nrf_802154_examples::mpsl_peripherals!(p);
     let mpsl = MPSL.init(MultiprotocolServiceLayer::new(mpsl_p, Irqs, lfclk_cfg).unwrap());
+    info!("mpsl up");
     spawner.spawn(mpsl_task(mpsl).unwrap());
 
-    let mut radio = Radio::new(p.RADIO, p.EGU0, Irqs, mpsl, p.TIMER2, p.RTC2);
+    let mut radio = Radio::new(
+        p.RADIO,
+        nrf_802154_examples::radio_peripherals!(p),
+        Irqs,
+        mpsl,
+    );
+    info!("radio up");
     radio.set_channel(CHANNEL);
     radio.set_pan_id(Some(PAN_ID));
     radio.set_short_addr(Some(SHORT_ADDR));

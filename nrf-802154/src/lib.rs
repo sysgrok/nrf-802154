@@ -147,4 +147,6 @@ mod radio;
 
 #[cfg(feature = "openthread")]
 pub use openthread::OpenThreadRadio;
-pub use platform::{Egu0InterruptHandler, LpTimerInterruptHandler};
+#[cfg(feature = "_nrf54l")]
+pub use platform::CcmInterruptHandler;
+pub use platform::{EguInterruptHandler, LpTimerInterruptHandler};
