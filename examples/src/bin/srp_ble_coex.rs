@@ -37,7 +37,7 @@ use embedded_alloc::LlffHeap as Heap;
 use nrf_802154::{OpenThreadRadio, Radio};
 use nrf_802154_examples::Irqs;
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
-use nrf_mpsl::{MultiprotocolServiceLayer, Peripherals as MpslPeripherals};
+use nrf_mpsl::MultiprotocolServiceLayer;
 
 use nrf_sdc::{self as sdc, Mem as SdcMem, Peripherals as SdcPeripherals};
 
@@ -104,7 +104,7 @@ static HEAP: Heap = Heap::empty();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let p = embassy_nrf::init(Default::default());
+    let p = nrf_802154_examples::init();
 
     info!("Starting (802.15.4 + BLE coex)...");
 
@@ -117,7 +117,7 @@ async fn main(spawner: Spawner) {
     };
 
     // MPSL owns RTC0, TIMER0, TEMP and PPI 19/30/31.
-    let mpsl_p = MpslPeripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
+    let mpsl_p = nrf_802154_examples::mpsl_peripherals!(p);
     let mpsl = MPSL.init(MultiprotocolServiceLayer::new(mpsl_p, Irqs, lfclk_cfg).unwrap());
     spawner.spawn(mpsl_task(mpsl).unwrap());
 
@@ -151,7 +151,12 @@ async fn main(spawner: Spawner) {
 
     // --- Build the 802.15.4 radio on the SAME MPSL ---
     // Radio owns EGU0, TIMER2, RTC2.
-    let radio = Radio::new(p.RADIO, p.EGU0, Irqs, mpsl, p.TIMER2, p.RTC2);
+    let radio = Radio::new(
+        p.RADIO,
+        nrf_802154_examples::radio_peripherals!(p),
+        Irqs,
+        mpsl,
+    );
     let radio = OpenThreadRadio::new(radio);
 
     // --- OpenThread ---

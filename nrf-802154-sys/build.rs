@@ -12,6 +12,7 @@ enum Series {
     Nrf53,
     Nrf54l,
     Nrf54lNs,
+    Nrf54lm20,
     Nrf54h,
 }
 
@@ -21,13 +22,15 @@ impl Series {
         let nrf53 = cfg!(feature = "nrf53");
         let nrf54l_s = cfg!(feature = "nrf54l-s");
         let nrf54l_ns = cfg!(feature = "nrf54l-ns");
+        let nrf54lm20_s = cfg!(feature = "nrf54lm20-s");
         let nrf54h = cfg!(feature = "nrf54h");
-        match (nrf52, nrf53, nrf54l_s, nrf54l_ns, nrf54h) {
-            (true, false, false, false, false) => Series::Nrf52,
-            (false, true, false, false, false) => Series::Nrf53,
-            (false, false, true, false, false) => Series::Nrf54l,
-            (false, false, false, true, false) => Series::Nrf54lNs,
-            (false, false, false, false, true) => Series::Nrf54h,
+        match (nrf52, nrf53, nrf54l_s, nrf54l_ns, nrf54lm20_s, nrf54h) {
+            (true, false, false, false, false, false) => Series::Nrf52,
+            (false, true, false, false, false, false) => Series::Nrf53,
+            (false, false, true, false, false, false) => Series::Nrf54l,
+            (false, false, false, true, false, false) => Series::Nrf54lNs,
+            (false, false, false, false, true, false) => Series::Nrf54lm20,
+            (false, false, false, false, false, true) => Series::Nrf54h,
             _ => panic!("Exactly one architecture feature must be enabled for nrf-802154-sys"),
         }
     }
@@ -97,6 +100,31 @@ impl Target {
                 Some("NRF_APPLICATION"),
                 None,
             ),
+            // The nRF54LM20 needs its own chip define rather than riding on the
+            // nRF54L15 one: the two agree on every peripheral the driver
+            // touches (RADIO, EGU10, TIMER10, DPPIC10/20, PPIB11/21, GRTC)
+            // except `CCM00`, which the encryption accelerator path writes to
+            // and which sits at a different address here.
+            //
+            // Only the secure variant is offered, matching `nrf-mpsl` and
+            // `embassy-nrf`. The A revision is the one both of those target;
+            // `NRF54LM20B_XXAA` would need its own feature.
+            (Series::Nrf54lm20, "thumbv8m.main-none-eabihf") => (
+                "cortex-m33",
+                "hard",
+                "nrf54lm20a_cpuapp",
+                "NRF54LM20A_XXAA",
+                Some("NRF_APPLICATION"),
+                None,
+            ),
+            (Series::Nrf54lm20, "thumbv8m.main-none-eabi") => (
+                "cortex-m33",
+                "soft",
+                "nrf54lm20a_cpuapp",
+                "NRF54LM20A_XXAA",
+                Some("NRF_APPLICATION"),
+                None,
+            ),
             (Series::Nrf54h, "thumbv8m.main-none-eabihf") => (
                 "cortex-m33",
                 "hard",
@@ -137,7 +165,9 @@ impl Target {
 fn series_extra_defines() -> &'static [&'static str] {
     match Series::get() {
         Series::Nrf52 | Series::Nrf53 => &[],
-        Series::Nrf54l | Series::Nrf54lNs | Series::Nrf54h => &["-DNRF_CONFIG_CPU_FREQ_MHZ=128"],
+        Series::Nrf54l | Series::Nrf54lNs | Series::Nrf54lm20 | Series::Nrf54h => {
+            &["-DNRF_CONFIG_CPU_FREQ_MHZ=128"]
+        }
     }
 }
 
@@ -150,7 +180,7 @@ fn bindgen(target: &Target) -> bindgen::Builder {
         "-DNRF_802154_EGU_INSTANCE={}",
         match Series::get() {
             Series::Nrf52 | Series::Nrf53 => "NRF_EGU0",
-            Series::Nrf54l | Series::Nrf54lNs => "NRF_EGU10",
+            Series::Nrf54l | Series::Nrf54lNs | Series::Nrf54lm20 => "NRF_EGU10",
             Series::Nrf54h => "NRF_EGU020",
         }
     );
@@ -233,7 +263,7 @@ fn build(target: &Target) {
         "-DNRF_802154_EGU_INSTANCE={}",
         match Series::get() {
             Series::Nrf52 | Series::Nrf53 => "NRF_EGU0",
-            Series::Nrf54l | Series::Nrf54lNs => "NRF_EGU10",
+            Series::Nrf54l | Series::Nrf54lNs | Series::Nrf54lm20 => "NRF_EGU10",
             Series::Nrf54h => "NRF_EGU020",
         }
     );

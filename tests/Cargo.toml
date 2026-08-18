@@ -18,9 +18,36 @@ name = "cli_node"
 path = "src/bin/cli_node.rs"
 harness = false
 
+[features]
+default = ["nrf52840"]
+# Put the console on the board's own USB peripheral instead of a UART, for a
+# board whose only serial port *is* USB - a XIAO nRF52840 plugged straight into
+# the host, or an nRF52840 dongle. The default is a UART, which is what a board
+# reached through a debug probe's UART bridge needs (and the only thing an
+# nRF54L15 can offer, having no USB peripheral at all).
+console-usb = ["dep:embassy-usb"]
+# Which pins the UART console comes out on. The default is the nRF52840-DK's
+# J-Link virtual COM port (P0.06 TX, P0.08 RX); `console-uart-xiao` selects a
+# XIAO nRF52840's D6/D7 pads (P1.11 TX, P1.12 RX), which is what a XIAO wired
+# to an external debug probe's UART bridge needs. Ignored under `console-usb`,
+# and on nRF54L15, whose console pins are fixed by its onboard probe.
+console-uart-xiao = []
+nrf52840 = [
+    "nrf-802154/nrf52840",
+    "nrf-mpsl/nrf52840",
+    "embassy-nrf/nrf52840",
+    "embassy-nrf/time-driver-rtc1",
+]
+nrf54l15 = [
+    "nrf-802154/nrf54l15-app-s",
+    "nrf-mpsl/nrf54l15-app-s",
+    "embassy-nrf/nrf54l15-app-s",
+    "embassy-nrf/time-driver-grtc",
+]
+
 [dependencies]
-nrf-802154 = { path = "../nrf-802154", version = "0.1", features = ["nrf52840", "defmt", "openthread"] }
-nrf-mpsl = { version = "0.3.0", features = ["nrf52840", "critical-section-impl"] }
+nrf-802154 = { path = "../nrf-802154", version = "0.1", default-features = false, features = ["defmt", "openthread"] }
+nrf-mpsl = { version = "0.3.0", default-features = false, features = ["critical-section-impl"] }
 
 # The same feature set the `openthread` repo's DUTs are built with, so the
 # harness meets the same CLI surface on this tier too.
@@ -86,13 +113,14 @@ tinyrlibc = { version = "0.5", default-features = false, features = [
     "strtoul",
 ] }
 embedded-alloc = "0.7.0"
+embedded-storage-async = "0.4.1"
 
 embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
-embassy-nrf = { version = "0.11", features = ["nrf52840", "time-driver-rtc1", "unstable-pac", "time"] }
+embassy-nrf = { version = "0.11", default-features = false, features = ["unstable-pac", "time"] }
 embassy-sync = { version = "0.8", features = ["defmt"] }
 embassy-futures = "0.1"
 embassy-time = { version = "0.5", features = ["defmt"] }
-embassy-usb = { version = "0.5", features = ["defmt"] }
+embassy-usb = { version = "0.5", features = ["defmt"], optional = true }
 
 defmt = "1"
 defmt-rtt = "1"

@@ -26,9 +26,24 @@ nrf52832 = ["nrf-mpsl/nrf52832", "nrf52", "embassy-nrf/nrf52832"]
 nrf52833 = ["nrf-mpsl/nrf52833", "nrf52", "embassy-nrf/nrf52833"]
 nrf52840 = ["nrf-mpsl/nrf52840", "nrf52", "embassy-nrf/nrf52840"]
 nrf5340-net = ["nrf-mpsl/nrf5340-net", "nrf53", "embassy-nrf/nrf5340-net"]
+nrf54l05-app-s = ["nrf-mpsl/nrf54l05-app-s", "nrf54l-s", "embassy-nrf/nrf54l05-app-s"]
+nrf54l10-app-s = ["nrf-mpsl/nrf54l10-app-s", "nrf54l-s", "embassy-nrf/nrf54l10-app-s"]
+nrf54l10-app-ns = ["nrf-mpsl/nrf54l10-app-ns", "nrf54l-ns", "embassy-nrf/nrf54l10-app-ns"]
+nrf54l15-app-s = ["nrf-mpsl/nrf54l15-app-s", "nrf54l-s", "embassy-nrf/nrf54l15-app-s"]
+nrf54l15-app-ns = ["nrf-mpsl/nrf54l15-app-ns", "nrf54l-ns", "embassy-nrf/nrf54l15-app-ns"]
+# nRF54LM20: secure only, matching `nrf-mpsl` and `embassy-nrf`.
+nrf54lm20-app-s = ["nrf-mpsl/nrf54lm20-app-s", "nrf54lm20-s", "embassy-nrf/nrf54lm20-app-s"]
 
 nrf52 = ["nrf-802154-sys/nrf52"]
 nrf53 = ["nrf-802154-sys/nrf53"]
+# The prebuilt SL libraries are byte-identical across the whole nRF54L family
+# (only the secure/non-secure split matters), so a single pair of series-level
+# features covers nRF54L05/L10/L15. The nRF54LM20 still needs its own, because
+# the C driver is compiled against a chip define and that part moves `CCM00`.
+nrf54l-s = ["nrf-802154-sys/nrf54l-s", "_nrf54l"]
+nrf54l-ns = ["nrf-802154-sys/nrf54l-ns", "_nrf54l"]
+nrf54lm20-s = ["nrf-802154-sys/nrf54lm20-s", "_nrf54l"]
+_nrf54l = []
 
 defmt = ["dep:defmt", "nrf-mpsl/defmt"]
 log = ["dep:log", "nrf-mpsl/log"]

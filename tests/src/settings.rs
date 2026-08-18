@@ -32,6 +32,8 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::signal::Signal;
 
+use embedded_storage_async::nor_flash::NorFlash;
+
 use nrf_mpsl::Flash;
 
 use openthread::{Settings, SettingsError, SimpleRamSettings};
@@ -47,6 +49,17 @@ const PAYLOAD_MAX: usize = 1024;
 
 /// One flash page, which is what `memory.x` reserves for the image.
 const PAGE_SIZE: usize = 4096;
+
+/// The granularity a write must come in, which is not the same everywhere:
+/// one 32-bit word on nRF52's NVMC, but a 128-bit line on nRF54L's RRAM. It
+/// matters because `nrf_mpsl::Flash` rejects a misaligned length outright
+/// rather than padding it for us - so hard-coding the nRF52 figure left the
+/// nRF54L node silently RAM-only, its settings gone on every reset.
+const WRITE_SIZE: usize = <Flash<'static> as NorFlash>::WRITE_SIZE;
+
+/// The serialization buffer, rounded up to whole write units so that even a
+/// maximum-size image has room for its padding.
+const IMG_LEN: usize = (HDR_LEN + PAYLOAD_MAX).next_multiple_of(WRITE_SIZE);
 
 /// The shared state between the [`FlashSettings`] handle (driven
 /// synchronously by OpenThread) and [`run`] (the persist task).
@@ -201,7 +214,7 @@ impl Settings for FlashSettings {
 /// whenever it changes. Run this on the main executor for the life of the
 /// node.
 pub async fn run(state: &'static FlashSettingsState, mut flash: Flash<'static>, offset: u32) -> ! {
-    let mut img = [0; HDR_LEN + PAYLOAD_MAX];
+    let mut img = [0; IMG_LEN];
 
     loop {
         state.dirty.wait().await;
@@ -212,9 +225,9 @@ pub async fn run(state: &'static FlashSettingsState, mut flash: Flash<'static>, 
         let len = state.with_ram(|ram| serialize(ram, &mut img));
         defmt::debug!("Settings: persisting gen {} image len {}", dirty_gen, len);
 
-        // NVMC writes are word-granular; the pad bytes never parse, as the
-        // length field bounds them out.
-        let len = len.next_multiple_of(4);
+        // Writes are granular (see `WRITE_SIZE`); the pad bytes never parse,
+        // as the length field bounds them out.
+        let len = len.next_multiple_of(WRITE_SIZE);
 
         // A failed write leaves the settings RAM-only: the node keeps
         // working, and the loss surfaces (loudly) only if it resets.
@@ -272,7 +285,7 @@ fn load(ram: &mut SimpleRamSettings<'static>, flash: &mut Flash<'_>, offset: u32
 }
 
 /// Serialize `ram` into `img`, returning the total image length.
-fn serialize(ram: &SimpleRamSettings<'static>, img: &mut [u8; HDR_LEN + PAYLOAD_MAX]) -> usize {
+fn serialize(ram: &SimpleRamSettings<'static>, img: &mut [u8; IMG_LEN]) -> usize {
     let mut pos = HDR_LEN;
     for (key, value) in ram.iter() {
         img[pos..pos + 2].copy_from_slice(&key.to_le_bytes());

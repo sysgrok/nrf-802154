@@ -19,15 +19,12 @@ use defmt::info;
 
 use embassy_executor::Spawner;
 
-use embassy_nrf::mode::Blocking;
-use embassy_nrf::rng::Rng;
-
 use embedded_alloc::LlffHeap as Heap;
 
 use nrf_802154::{OpenThreadRadio, Radio};
-use nrf_802154_examples::Irqs;
+use nrf_802154_examples::{Irqs, Rng};
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
-use nrf_mpsl::{MultiprotocolServiceLayer, Peripherals as MpslPeripherals};
+use nrf_mpsl::MultiprotocolServiceLayer;
 
 use openthread::{
     BytesFmt, OpenThread, OtResources, OtSrpResources, OtUdpResources, SimpleRamSettings, SrpConf,
@@ -88,7 +85,7 @@ static HEAP: Heap = Heap::empty();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let p = embassy_nrf::init(Default::default());
+    let p = nrf_802154_examples::init();
 
     info!("Starting...");
 
@@ -100,11 +97,11 @@ async fn main(spawner: Spawner) {
         skip_wait_lfclk_started: nrf_mpsl::raw::MPSL_DEFAULT_SKIP_WAIT_LFCLK_STARTED != 0,
     };
 
-    let mpsl_p = MpslPeripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
+    let mpsl_p = nrf_802154_examples::mpsl_peripherals!(p);
     let mpsl = MPSL.init(MultiprotocolServiceLayer::new(mpsl_p, Irqs, lfclk_cfg).unwrap());
     spawner.spawn(mpsl_task(mpsl).unwrap());
 
-    let rng = mk_static!(Rng<'static, Blocking>, Rng::new_blocking(p.RNG));
+    let rng = mk_static!(Rng<'static>, nrf_802154_examples::rng!(p));
 
     let mut ieee_eui64 = [0; 8];
     RngCore::fill_bytes(rng, &mut ieee_eui64);
@@ -132,7 +129,12 @@ async fn main(spawner: Spawner) {
 
     info!("About to spawn OT runner");
 
-    let radio = Radio::new(p.RADIO, p.EGU0, Irqs, mpsl, p.TIMER2, p.RTC2);
+    let radio = Radio::new(
+        p.RADIO,
+        nrf_802154_examples::radio_peripherals!(p),
+        Irqs,
+        mpsl,
+    );
     let radio = OpenThreadRadio::new(radio);
 
     spawner.spawn(run_ot(ot.clone(), radio).unwrap());
