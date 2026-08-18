@@ -37,10 +37,12 @@ cargo build -p nrf-802154-examples --no-default-features --features nrf54l15 --t
 cargo build -p nrf-802154-examples --no-default-features --features nrf54lm20 --target thumbv8m.main-none-eabihf
 
 # The OpenThread HIL test node (`tests/`, the `cli_node` firmware driven by the
-# `openthread` repo's upstream-suite harness). It stays nRF52840-only: its
-# console rides on the USB device peripheral, which the nRF54L05/L10/L15 do not
-# have. Chip and features are baked into its Cargo.toml; the target is passed
+# `openthread` repo's upstream-suite harness). The target is passed
 # explicitly because the crate's own `.cargo/config.toml` only applies when
 # building from within its directory.
+# Both console bindings: a UART by default (a board reached through a debug
+# probe's UART bridge), and the board's own USB peripheral under `console-usb`.
 cargo clippy -p nrf-802154-tests --target thumbv7em-none-eabi
+cargo clippy -p nrf-802154-tests --features console-usb --target thumbv7em-none-eabi
+cargo clippy -p nrf-802154-tests --no-default-features --features nrf54l15 --target thumbv8m.main-none-eabihf
 cargo build -p nrf-802154-tests --release --target thumbv7em-none-eabi

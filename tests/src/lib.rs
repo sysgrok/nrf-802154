@@ -5,14 +5,19 @@
 //! and the 802.15.4 driver claim, and which peripheral the console rides on —
 //! is collected here.
 //!
-//! The console binding follows the chip rather than a feature of its own,
-//! because there is no choice to make: the nRF52840 board's only serial port
-//! *is* its USB peripheral, and the nRF54L15 has no USB peripheral at all. On
-//! the XIAO nRF54L15 the console is UART20, wired to the onboard SAMD11
-//! CMSIS-DAP probe, which presents it to the host as a USB CDC port — so the
-//! harness sees the same thing either way.
+//! The console is a UART by default and the board's own USB peripheral under
+//! `console-usb`, matching the `openthread` repo's nRF node. Which one a board
+//! needs is a wiring question: a XIAO plugged straight into the host has no
+//! serial port but USB, while a board reached through a debug probe gets its
+//! console over the probe's UART bridge. Either way the harness sees a USB CDC
+//! port on the host, so the substitution is invisible to it.
+//!
+//! `console-usb` is nRF52840-only — the nRF54L15 has no USB peripheral at all.
 
 #![no_std]
+
+#[cfg(all(feature = "console-usb", not(feature = "nrf52840")))]
+compile_error!("`console-usb` needs a USB peripheral, which only the nRF52840 target has here");
 
 use embassy_nrf::bind_interrupts;
 
@@ -32,8 +37,11 @@ bind_interrupts!(pub struct Irqs {
     CLOCK_POWER => nrf_mpsl::ClockInterruptHandler;
     // 802.15.4 LP timer (RTC2 on nRF52840)
     RTC2 => nrf_802154::LpTimerInterruptHandler;
-    // The USB console
+    // The console
+    #[cfg(feature = "console-usb")]
     USBD => embassy_nrf::usb::InterruptHandler<embassy_nrf::peripherals::USBD>;
+    #[cfg(not(feature = "console-usb"))]
+    UARTE0 => embassy_nrf::buffered_uarte::InterruptHandler<embassy_nrf::peripherals::UARTE0>;
 });
 
 #[cfg(feature = "nrf54l15")]
@@ -248,4 +256,78 @@ pub fn ieee_eui64() -> [u8; 8] {
     eui64[0] = (eui64[0] & 0xfe) | 0x02;
 
     eui64
+}
+
+/// The console UART's `(rxd, txd)` pins: an nRF52840-DK's J-Link virtual COM
+/// port by default, a XIAO nRF52840's D6/D7 pads under `console-uart-xiao`.
+#[cfg(all(feature = "nrf52840", not(feature = "console-uart-xiao")))]
+#[macro_export]
+macro_rules! console_uart_pins {
+    ($p:expr) => {
+        ($p.P0_08, $p.P0_06)
+    };
+}
+
+/// The console UART's `(rxd, txd)` pins - see the other arm.
+#[cfg(all(feature = "nrf52840", feature = "console-uart-xiao"))]
+#[macro_export]
+macro_rules! console_uart_pins {
+    ($p:expr) => {
+        ($p.P1_12, $p.P1_11)
+    };
+}
+
+/// Build the console UART, returning `(rx, tx)`.
+///
+/// nRF52840: `UARTE0` on the pins `console_uart_pins` selects.
+///
+/// Buffered rather than a raw `Uarte`: a raw `UarteRx::read` only arms EasyDMA
+/// for the duration of the call, so bytes arriving while the node echoes the
+/// previous one are lost, and the harness sees commands mangled into
+/// `InvalidCommand`. The buffered driver keeps RX armed into a ring buffer.
+///
+/// The TIMER, PPI channels and PPI group are ones neither MPSL (RTC0, TIMER0,
+/// TEMP, PPI 19/30/31) nor the 802.15.4 driver (PPI 6-11 and 13/14, PPI groups
+/// 0-2) claims.
+#[cfg(all(feature = "nrf52840", not(feature = "console-usb")))]
+#[macro_export]
+macro_rules! console_uart {
+    ($p:expr, $config:expr, $rx_buf:expr, $tx_buf:expr) => {{
+        let (rxd, txd) = $crate::console_uart_pins!($p);
+        embassy_nrf::buffered_uarte::BufferedUarte::new(
+            $p.UARTE0,
+            $p.TIMER1,
+            $p.PPI_CH0,
+            $p.PPI_CH1,
+            $p.PPI_GROUP3,
+            rxd,
+            txd,
+            $crate::Irqs,
+            $config,
+            $rx_buf,
+            $tx_buf,
+        )
+        .split()
+    }};
+}
+
+/// Build the console UART, returning `(rx, tx)`.
+///
+/// nRF54L15: `UART20` on P1.08/P1.09, as the XIAO nRF54L15's onboard SAMD11
+/// CMSIS-DAP probe bridges it. See the nRF52840 arm for why this is buffered.
+#[cfg(feature = "nrf54l15")]
+#[macro_export]
+macro_rules! console_uart {
+    ($p:expr, $config:expr, $rx_buf:expr, $tx_buf:expr) => {
+        embassy_nrf::buffered_uarte::BufferedUarte::new(
+            $p.SERIAL20,
+            $p.P1_08,
+            $p.P1_09,
+            $crate::Irqs,
+            $config,
+            $rx_buf,
+            $tx_buf,
+        )
+        .split()
+    };
 }

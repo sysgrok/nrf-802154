@@ -35,18 +35,18 @@
 
 use embassy_executor::Spawner;
 
-#[cfg(feature = "nrf54l15")]
-use embassy_nrf::buffered_uarte::{BufferedUarte, BufferedUarteRx, BufferedUarteTx};
-#[cfg(feature = "nrf54l15")]
+#[cfg(not(feature = "console-usb"))]
+use embassy_nrf::buffered_uarte::{BufferedUarteRx, BufferedUarteTx};
+#[cfg(all(feature = "nrf54l15", not(feature = "console-usb")))]
 use embassy_nrf::peripherals;
-#[cfg(feature = "nrf54l15")]
+#[cfg(not(feature = "console-usb"))]
 use embassy_nrf::uarte;
-#[cfg(feature = "nrf52840")]
+#[cfg(feature = "console-usb")]
 use embassy_nrf::{peripherals, usb};
 
-#[cfg(feature = "nrf52840")]
+#[cfg(feature = "console-usb")]
 use embassy_usb::class::cdc_acm::{self, CdcAcmClass};
-#[cfg(feature = "nrf52840")]
+#[cfg(feature = "console-usb")]
 use embassy_usb::UsbDevice;
 
 use embedded_alloc::LlffHeap as Heap;
@@ -82,12 +82,19 @@ const SETTINGS_OFFSET: u32 = 0x000f_f000;
 const SETTINGS_OFFSET: u32 = 0x0017_c000;
 
 /// The console's two ends: the board's own USB peripheral (CDC-ACM).
-#[cfg(feature = "nrf52840")]
+#[cfg(feature = "console-usb")]
 type UsbDriver = usb::Driver<'static, &'static usb::vbus_detect::SoftwareVbusDetect>;
-#[cfg(feature = "nrf52840")]
+#[cfg(feature = "console-usb")]
 type ConsoleTx = cdc_acm::Sender<'static, UsbDriver>;
-#[cfg(feature = "nrf52840")]
+#[cfg(feature = "console-usb")]
 type ConsoleRx = cdc_acm::Receiver<'static, UsbDriver>;
+
+/// The console's two ends: a UART, reached through a debug probe's bridge.
+/// (embassy's pre-nRF54L buffered UART is not generic over the instance.)
+#[cfg(all(feature = "nrf52840", not(feature = "console-usb")))]
+type ConsoleTx = BufferedUarteTx<'static>;
+#[cfg(all(feature = "nrf52840", not(feature = "console-usb")))]
+type ConsoleRx = BufferedUarteRx<'static>;
 
 /// The console's two ends: UART20, which the board's onboard CMSIS-DAP probe
 /// bridges to a USB CDC port on the host.
@@ -167,38 +174,26 @@ async fn main(spawner: Spawner) {
     ));
     spawner.spawn(run_ot(ot.clone(), radio).unwrap());
 
-    #[cfg(feature = "nrf52840")]
+    #[cfg(feature = "console-usb")]
     let (console_tx, console_rx) = {
         let (console_tx, console_rx, usb) = build_usb_console(p.USBD);
         spawner.spawn(run_usb(usb).unwrap());
         (console_tx, console_rx)
     };
 
-    #[cfg(feature = "nrf54l15")]
+    #[cfg(not(feature = "console-usb"))]
     let (console_tx, console_rx) = {
         let mut uarte_config = uarte::Config::default();
         uarte_config.baudrate = uarte::Baudrate::Baud115200;
         uarte_config.parity = uarte::Parity::Excluded;
 
-        // Buffered, not the raw `Uarte`: a raw `UarteRx::read` only arms
-        // EasyDMA for the duration of the call, so every byte that arrives
-        // while the node is echoing the previous one is lost - which the
-        // harness sees as commands mangled into `InvalidCommand`. The
-        // buffered driver keeps RX armed into a ring buffer instead.
-        //
-        // UART20, as the onboard CMSIS-DAP probe bridges it: nRF TX on P1.09,
-        // nRF RX on P1.08. The constructor takes rxd before txd.
-        let (console_rx, console_tx) = BufferedUarte::new(
-            p.SERIAL20,
-            p.P1_08,
-            p.P1_09,
-            Irqs,
+        // Which UART, on which pins, is board-specific - see `console_uart`.
+        let (console_rx, console_tx) = nrf_802154_tests::console_uart!(
+            p,
             uarte_config,
             mk_static!([u8; 1024], [0; 1024]),
-            mk_static!([u8; 1024], [0; 1024]),
-        )
-        .split();
-        // `split` hands back rx first.
+            mk_static!([u8; 1024], [0; 1024])
+        );
         (console_tx, console_rx)
     };
 
@@ -223,12 +218,12 @@ async fn run_cli(ot: OpenThread<'static>, mut console_rx: ConsoleRx) -> ! {
     loop {
         // USB is packetized and only readable while the host has the port
         // open; the UART is a plain byte stream, one byte at a time.
-        #[cfg(feature = "nrf52840")]
+        #[cfg(feature = "console-usb")]
         let read = {
             console_rx.wait_connection().await;
             console_rx.read_packet(&mut buf).await
         };
-        #[cfg(feature = "nrf54l15")]
+        #[cfg(not(feature = "console-usb"))]
         let read = console_rx.read(&mut buf).await;
 
         let Ok(len) = read else {
@@ -287,7 +282,7 @@ async fn run_console_out(mut console_tx: ConsoleTx) -> ! {
     let mut buf = [0; 512];
 
     loop {
-        #[cfg(feature = "nrf52840")]
+        #[cfg(feature = "console-usb")]
         console_tx.wait_connection().await;
 
         let len = console::read_out(&mut buf).await;
@@ -298,7 +293,7 @@ async fn run_console_out(mut console_tx: ConsoleTx) -> ! {
         // and a burst larger than the TX ring buffer is accepted in pieces.
         // Discarding that count truncates CLI output mid-line, which the
         // harness sees as a command that never finished answering.
-        #[cfg(feature = "nrf54l15")]
+        #[cfg(not(feature = "console-usb"))]
         {
             let mut sent = 0;
             while sent < len {
@@ -314,7 +309,7 @@ async fn run_console_out(mut console_tx: ConsoleTx) -> ! {
             let _ = console_tx.flush().await;
         }
 
-        #[cfg(feature = "nrf52840")]
+        #[cfg(feature = "console-usb")]
         {
             // How long a packet write may sit unaccepted before the output is
             // dropped. Generous next to USB speeds, so it only fires when nobody
@@ -348,7 +343,7 @@ async fn run_console_out(mut console_tx: ConsoleTx) -> ! {
     }
 }
 
-#[cfg(feature = "nrf52840")]
+#[cfg(feature = "console-usb")]
 /// Build the USB CDC console: the board's own USB peripheral presented to
 /// the host as a serial port.
 ///
@@ -403,7 +398,7 @@ async fn run_settings(flash: Flash<'static>) -> ! {
     settings::run(&SETTINGS_STATE, flash, SETTINGS_OFFSET).await
 }
 
-#[cfg(feature = "nrf52840")]
+#[cfg(feature = "console-usb")]
 #[embassy_executor::task]
 async fn run_usb(mut usb: UsbDevice<'static, UsbDriver>) -> ! {
     usb.run().await

@@ -20,13 +20,23 @@ harness = false
 
 [features]
 default = ["nrf52840"]
-
+# Put the console on the board's own USB peripheral instead of a UART, for a
+# board whose only serial port *is* USB - a XIAO nRF52840 plugged straight into
+# the host, or an nRF52840 dongle. The default is a UART, which is what a board
+# reached through a debug probe's UART bridge needs (and the only thing an
+# nRF54L15 can offer, having no USB peripheral at all).
+console-usb = ["dep:embassy-usb"]
+# Which pins the UART console comes out on. The default is the nRF52840-DK's
+# J-Link virtual COM port (P0.06 TX, P0.08 RX); `console-uart-xiao` selects a
+# XIAO nRF52840's D6/D7 pads (P1.11 TX, P1.12 RX), which is what a XIAO wired
+# to an external debug probe's UART bridge needs. Ignored under `console-usb`,
+# and on nRF54L15, whose console pins are fixed by its onboard probe.
+console-uart-xiao = []
 nrf52840 = [
     "nrf-802154/nrf52840",
     "nrf-mpsl/nrf52840",
     "embassy-nrf/nrf52840",
     "embassy-nrf/time-driver-rtc1",
-    "dep:embassy-usb",
 ]
 nrf54l15 = [
     "nrf-802154/nrf54l15-app-s",

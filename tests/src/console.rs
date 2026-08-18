@@ -72,13 +72,6 @@ pub async fn read_out(buf: &mut [u8]) -> usize {
     OUT.read(buf).await
 }
 
-/// Wait until every byte queued so far has reached the wire.
-///
-/// The command loop awaits this after each CLI command, BEFORE reading the
-/// next one: the harness is strictly command-response paced, so parking here
-/// hands the executor to the drain task until the response is fully on the
-/// wire - cooperative backpressure that makes command/response traffic
-/// lossless without ever blocking the (synchronous) output callback.
 /// Whether the console task is holding bytes it has taken from [`OUT`] but
 /// not yet put on the wire.
 ///
@@ -102,6 +95,13 @@ pub fn tx_end() {
     TX_INFLIGHT.store(false, Ordering::Release);
 }
 
+/// Wait until every byte queued so far has reached the wire.
+///
+/// The command loop awaits this after each CLI command, BEFORE reading the
+/// next one: the harness is strictly command-response paced, so parking here
+/// hands the executor to the drain task until the response is fully on the
+/// wire - cooperative backpressure that makes command/response traffic
+/// lossless without ever blocking the (synchronous) output callback.
 pub async fn drained() {
     while !OUT.is_empty() || TX_INFLIGHT.load(Ordering::Acquire) {
         // The drain task is the one emptying the pipe; yielding is what lets
