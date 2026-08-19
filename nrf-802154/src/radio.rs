@@ -770,8 +770,8 @@ impl<'d> Radio<'d> {
                     //
                     // `InvalidAck` belongs here rather than with the faults
                     // because the driver reports it for anything that turns up
-                    // in the ~210us ACK window, which it neither address-filters
-                    // nor acknowledges: a neighbour transmitting concurrently
+                    // in the ACK window, which it neither address-filters nor
+                    // acknowledges: a neighbour transmitting concurrently
                     // lands a perfectly valid non-ACK frame there, and that is
                     // what the overwhelming majority of these are. A genuinely
                     // mismatched ACK - wrong sequence number, or an Enh-Ack
