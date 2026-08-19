@@ -17,7 +17,7 @@ The [SoftDevice Controller](https://github.com/alexmoon/nrf-sdc/tree/main) and t
 | nRF52805/10/11/20/32/33 | `nrf52805` … `nrf52833` | `thumbv7em-none-eabi` | builds |
 | nRF52840 | `nrf52840` | `thumbv7em-none-eabi` | tested on hardware |
 | nRF5340 (network core) | `nrf5340-net` | `thumbv8m.main-none-eabi` | builds |
-| nRF54L05/L10/L15 (application core) | `nrf54l05-app-s`, `nrf54l10-app-s`/`-ns`, `nrf54l15-app-s`/`-ns` | `thumbv8m.main-none-eabihf` | builds |
+| nRF54L05/L10/L15 (application core) | `nrf54l05-app-s`, `nrf54l10-app-s`/`-ns`, `nrf54l15-app-s`/`-ns` | `thumbv8m.main-none-eabihf` | tested on hardware |
 | nRF54LM20A (application core) | `nrf54lm20-app-s` | `thumbv8m.main-none-eabihf` | builds |
 | nRF54H20 | — | — | not supported |
 
