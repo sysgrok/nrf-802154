@@ -565,27 +565,7 @@ impl<'d> Radio<'d> {
             }
         }
 
-        let packet_data = RadioState::wait(|state| {
-            if !TX_BUSY.load(Ordering::Acquire) {
-                state.tx[0] = data.len() as u8 + 2; // + CRC/FCS
-                state.tx[1..][..data.len()].copy_from_slice(data);
-                state.tx[1 + data.len()] = 0; // CRC placeholder
-                state.tx[1 + data.len() + 1] = 0; // CRC placeholder
-
-                let packet_data: &mut [u8] = &mut state.tx;
-
-                Some(packet_data.as_mut_ptr())
-            } else {
-                None
-            }
-        })
-        .await;
-
-        STATE.lock(|state| {
-            let mut state = state.borrow_mut();
-            state.status = RadioStatus::Idle;
-            state.tx_result = None;
-        });
+        let (claim, packet_data) = TxClaim::claim(data).await;
 
         let metadata = raw::nrf_802154_transmit_metadata_t {
             // The OpenThread integration never advertises `TRANSMIT_SEC`, so the
@@ -638,9 +618,18 @@ impl<'d> Radio<'d> {
         }
 
         if !scheduled {
+            // Returning drops `claim`, which hands the buffer back: the driver
+            // never took the frame, so no completion callback will ever fire
+            // for it.
             warn!("nrf_802154 TX could not be scheduled after retries (radio busy)");
             return Err(Error::ScheduleTransmit);
         }
+
+        // The driver has the frame now, and holds our buffer pointer until it
+        // reports the outcome. Ownership of the claim passes to its completion
+        // callbacks; nothing on this side may release it any more - not even a
+        // drop of this future.
+        claim.into_driver();
 
         DBG_TX_SCHED.fetch_add(1, Ordering::Relaxed);
 
@@ -682,28 +671,7 @@ impl<'d> Radio<'d> {
             }
         }
 
-        // TODO: Potential race condition if the radio is scheduled to transmit but not transmitting yet
-        let packet_data = RadioState::wait(|state| {
-            if !TX_BUSY.load(Ordering::Acquire) {
-                state.tx[0] = data.len() as u8 + 2; // + CRC/FCS
-                state.tx[1..][..data.len()].copy_from_slice(data);
-                state.tx[1 + data.len()] = 0; // CRC placeholder
-                state.tx[1 + data.len() + 1] = 0; // CRC placeholder
-
-                let packet_data: &mut [u8] = &mut state.tx;
-
-                Some(packet_data.as_mut_ptr())
-            } else {
-                None
-            }
-        })
-        .await;
-
-        STATE.lock(|state| {
-            let mut state = state.borrow_mut();
-            state.status = RadioStatus::Idle;
-            state.tx_result = None;
-        });
+        let (claim, packet_data) = TxClaim::claim(data).await;
 
         let metadata = raw::nrf_802154_transmit_csma_ca_metadata_t {
             // See the note in `transmit`: OpenThread secures the frame in software
@@ -751,9 +719,18 @@ impl<'d> Radio<'d> {
         }
 
         if !scheduled {
+            // Returning drops `claim`, which hands the buffer back: the driver
+            // never took the frame, so no completion callback will ever fire
+            // for it.
             warn!("nrf_802154 TX could not be scheduled after retries (radio busy)");
             return Err(Error::ScheduleTransmit);
         }
+
+        // The driver has the frame now, and holds our buffer pointer until it
+        // reports the outcome. Ownership of the claim passes to its completion
+        // callbacks; nothing on this side may release it any more - not even a
+        // drop of this future.
+        claim.into_driver();
 
         DBG_TX_SCHED.fetch_add(1, Ordering::Relaxed);
 
@@ -800,16 +777,92 @@ impl<'d> Radio<'d> {
     }
 }
 
-/// "A frame transmission is in progress" flag.
+/// An RAII claim on the shared TX buffer.
 ///
-/// Set by the `tx_started` callback (which runs in the **high-priority radio
-/// IRQ** that the `CriticalSectionRawMutex` does NOT mask — MPSL keeps it above
-/// the critical-section level) and cleared by the TX-completion callbacks. It is
-/// a lock-free atomic precisely because it is written from that high-priority
-/// context: touching the `RefCell`-protected `RadioState` there would race with a
-/// `STATE.lock()` held by the executor and panic with "already borrowed".
-/// `transmit()` waits on this instead of a `RadioState` status before reusing the
-/// shared TX buffer.
+/// The C driver keeps the pointer we hand it for the whole transmission: it
+/// reads the PSDU while the frame is on air, and reads it *again* when matching
+/// the incoming ACK against the frame that was sent. Refilling the buffer
+/// before the transmission is over therefore either tears the outgoing frame or
+/// makes the driver compare the peer's ACK against a different frame than the
+/// one it acknowledges - which it reports as `TxError::InvalidAck`.
+///
+/// Hence a guard rather than a claim/release pair: the OpenThread run loop
+/// drops `transmit()` futures mid-flight (`select(new_cmd, tx)`) and
+/// immediately re-issues the TX, so a claim that is released only on the paths
+/// this side actually runs to the end would leak on every cancellation - and a
+/// leaked claim wedges every later transmission on the guard, since the frame
+/// the driver never took has no completion callback coming to clear it.
+///
+/// [`into_driver`](Self::into_driver) is the one exit that does *not* release:
+/// past that point the driver owns the buffer and its completion callbacks own
+/// the release.
+struct TxClaim(());
+
+impl TxClaim {
+    /// Wait until no transmission is in flight, then fill the shared buffer
+    /// with `data` and claim it - all in one critical section, so the flag and
+    /// the buffer contents can never disagree.
+    async fn claim(data: &[u8]) -> (Self, *mut u8) {
+        let packet_data = RadioState::wait(|state| {
+            if TX_BUSY.load(Ordering::Acquire) {
+                return None;
+            }
+
+            state.tx[0] = data.len() as u8 + 2; // + CRC/FCS
+            state.tx[1..][..data.len()].copy_from_slice(data);
+            state.tx[1 + data.len()] = 0; // CRC placeholder
+            state.tx[1 + data.len() + 1] = 0; // CRC placeholder
+
+            // Discard the completion of a previous transmission whose
+            // `transmit()` future was dropped before it could consume the
+            // result, so this transmission does not pick up that outcome.
+            state.status = RadioStatus::Idle;
+            state.tx_result = None;
+
+            TX_BUSY.store(true, Ordering::Release);
+
+            let packet_data: &mut [u8] = &mut state.tx;
+
+            Some(packet_data.as_mut_ptr())
+        })
+        .await;
+
+        (Self(()), packet_data)
+    }
+
+    /// Transfer the claim to the C driver, which has accepted the frame.
+    ///
+    /// Callable only with no `await` between the successful
+    /// `nrf_802154_transmit*` call and here, or a cancellation in that gap
+    /// would release a buffer the driver is already transmitting from.
+    fn into_driver(self) {
+        core::mem::forget(self);
+    }
+}
+
+impl Drop for TxClaim {
+    fn drop(&mut self) {
+        TX_BUSY.store(false, Ordering::Release);
+        // Wake a `claim` parked on the guard - the completion callbacks get
+        // this for free from `RadioState::update`.
+        STATE_SIGNAL.signal(());
+    }
+}
+
+/// "The C driver owns the shared TX buffer" flag.
+///
+/// Set by [`TxClaim::claim`] just before the frame is offered to the driver, and
+/// cleared either by dropping the claim or - once the driver has taken the
+/// frame - by the TX-completion callbacks. The driver has no "transmission
+/// started" callout to hang this on, and in any case ownership begins at
+/// `nrf_802154_transmit_raw()`, not at the first symbol on air.
+///
+/// It is a lock-free atomic rather than a `RadioState` field because the
+/// completion callbacks may run in a context above the level the
+/// `CriticalSectionRawMutex` masks: touching the `RefCell`-protected
+/// `RadioState` there would race with a `STATE.lock()` held by the executor and
+/// panic with "already borrowed". It is nonetheless only ever *set* from inside
+/// a `STATE.lock()`, so the claim and the buffer fill are one atomic step.
 static TX_BUSY: AtomicBool = AtomicBool::new(false);
 
 // Diagnostic run-loop progress counters (lock-free).
@@ -1166,9 +1219,10 @@ unsafe extern "C" fn nrf_802154_transmitted_raw(
     _p_frame: *mut u8,
     p_metadata: *const raw::nrf_802154_transmit_done_metadata_t,
 ) {
-    // The hardware TX has completed: clear the `TX_BUSY` flag set by `tx_started`.
-    // Done in the completion callback (which always fires when the hardware
-    // finishes), not in `wait_transmit_done` — under load the run loop's
+    // The transmission is over: the driver is done with the shared TX buffer,
+    // so release the claim handed to it by `TxClaim::into_driver`. Done here in
+    // the completion callback (which always fires once the driver has accepted
+    // a frame), not in `wait_transmit_done` — under load the run loop's
     // `select(new_cmd, transmit)` can drop the `transmit()` future mid-flight, so
     // `wait_transmit_done` may never run. A leaked `TX_BUSY` would otherwise stall
     // the next `transmit()` forever on its guard, wedging the run loop.
@@ -1212,20 +1266,12 @@ unsafe extern "C" fn nrf_802154_transmit_failed(
     error: raw::nrf_802154_tx_error_t,
     _p_metadata: *const raw::nrf_802154_transmit_done_metadata_t,
 ) {
-    // Clear `TX_BUSY` on hardware completion — see the note in `transmitted_raw`.
+    // Release the shared TX buffer — see the note in `transmitted_raw`.
     TX_BUSY.store(false, Ordering::Release);
 
     RadioState::update(|state| {
         state.tx_result = Some(TxResult::Failed(error));
     });
-}
-
-#[no_mangle]
-unsafe extern "C" fn nrf_802154_tx_started(_p_frame: *const u8) {
-    // A *direct* core callout, not a notification (see `tx_ack_started`): runs
-    // in the high-priority radio IRQ, so use the lock-free `TX_BUSY` flag, not
-    // the `RefCell`-protected `RadioState`.
-    TX_BUSY.store(true, Ordering::Release);
 }
 
 #[no_mangle]
