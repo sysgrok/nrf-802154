@@ -762,11 +762,25 @@ impl<'d> Radio<'d> {
                 let err = TxError::from(code);
                 match err {
                     // Routine air-level outcomes - the peer missed the frame,
-                    // or CSMA-CA lost the channel - which the MAC-layer
+                    // CSMA-CA lost the channel, or something that was not our
+                    // ACK arrived in the ACK window - which the MAC-layer
                     // retransmission policy exists to absorb. Not warnings,
                     // but a burst of them is the first thing to look at when
                     // debugging link quality.
-                    TxError::NoAck | TxError::BusyChannel => {
+                    //
+                    // `InvalidAck` belongs here rather than with the faults
+                    // because the driver reports it for anything that turns up
+                    // in the ~210us ACK window, which it neither address-filters
+                    // nor acknowledges: a neighbour transmitting concurrently
+                    // lands a perfectly valid non-ACK frame there, and that is
+                    // what the overwhelming majority of these are. A genuinely
+                    // mismatched ACK - wrong sequence number, or an Enh-Ack
+                    // addressing us differently than we sourced the frame -
+                    // is reported identically, so a rate that does not track
+                    // link load is worth splitting apart at `on_bad_ack` in the
+                    // C driver, which is the only place the two are still
+                    // distinguishable.
+                    TxError::NoAck | TxError::BusyChannel | TxError::InvalidAck => {
                         trace!("nrf_802154 TX failed: {:?}", err);
                     }
                     _ => warn!("nrf_802154 TX failed: {:?}", err),
