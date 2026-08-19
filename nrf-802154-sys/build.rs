@@ -295,7 +295,11 @@ fn build(target: &Target) {
     // `nrf_802154_tx_started` / `nrf_802154_tx_ack_started` are direct core
     // callouts, NOT notifications — they still run in the radio IRQ and must
     // stay lock-free (see `radio.rs`).
-    cmake::Config::new("third_party/nordic/nrfxlib/nrf_802154")
+    // `cmake/CMakeLists.txt` is a thin top-level project that adds the vendored
+    // upstream tree — which declares no `cmake_minimum_required()`/`project()`
+    // of its own, being meant for inclusion in a Zephyr build — as a
+    // subdirectory. See the comments there.
+    cmake::Config::new("cmake")
         .define("CMAKE_BUILD_TYPE", "MinSizeRel")
         .define(
             "CMAKE_C_FLAGS",
@@ -345,7 +349,9 @@ fn main() {
         .join(target.chip_family)
         .join(format!("{}-float", target.float_abi));
 
-    let lib_out_path = out_path.join("build");
+    // `nrf_802154` is the binary directory that the top-level
+    // `cmake/CMakeLists.txt` gives the upstream tree it adds.
+    let lib_out_path = out_path.join("build").join("nrf_802154");
     let lib_driver_path = lib_out_path.join("driver");
     let lib_common_path = lib_out_path.join("common");
 

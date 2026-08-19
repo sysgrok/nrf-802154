@@ -15,6 +15,9 @@ include = [
     "./*.md",
     "build.rs",
     "src/**",
+    # The top-level CMake project that `build.rs` configures; it adds the
+    # vendored upstream `nrf_802154` tree as a subdirectory.
+    "cmake/**",
     # This crate's own glue headers (`nrfx_glue.h`, freestanding `assert.h`/`string.h`),
     # referenced via `-I./include` by both bindgen and the cmake build.
     "include/**",
