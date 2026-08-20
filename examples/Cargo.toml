@@ -82,8 +82,8 @@ harness = false
 required-features = ["nrf52840"]
 
 [dependencies]
-nrf-802154 = { path = "../nrf-802154", version = "0.1", features = ["nrf52840", "defmt", "openthread"] }
-nrf-mpsl = { version = "0.3", features = ["nrf52840", "critical-section-impl"] }
+nrf-802154 = { path = "../nrf-802154", version = "0.1", features = ["defmt", "openthread"] }
+nrf-mpsl = { version = "0.3", features = ["critical-section-impl"] }
 nrf-sdc = { version = "0.4", default-features = false, features = ["peripheral", "central", "defmt"] }
 trouble-host = { version = "0.7", default-features = false, features = ["defmt", "gatt", "peripheral", "default-packet-pool"] }
 bt-hci = { version = "0.9", features = ["defmt"] }
