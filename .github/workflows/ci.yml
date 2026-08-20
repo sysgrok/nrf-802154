@@ -8,29 +8,128 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
 
 jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly
+        run: rustup toolchain add --component=rustfmt nightly
+      - name: Formatting
+        run: cargo +nightly fmt -- --check
+
   check:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The `nrf-802154-sys` bindings, one entry per prebuilt SL library
+          # variant.
+          - name: sys nrf52
+            cmd: clippy -p nrf-802154-sys --features nrf52
+          - name: sys nrf53
+            cmd: clippy -p nrf-802154-sys --features nrf53 --target thumbv8m.main-none-eabi
+          - name: sys nrf54l-s
+            cmd: clippy -p nrf-802154-sys --features nrf54l-s --target thumbv8m.main-none-eabihf
+          - name: sys nrf54l-ns
+            cmd: clippy -p nrf-802154-sys --features nrf54l-ns --target thumbv8m.main-none-eabihf
+          - name: sys nrf54lm20-s
+            cmd: clippy -p nrf-802154-sys --features nrf54lm20-s --target thumbv8m.main-none-eabihf
+          # The nRF54H sys build works, but the high-level `nrf-802154` crate
+          # cannot follow it yet: neither `nrf-mpsl` nor `embassy-nrf` supports
+          # that part.
+          - name: sys nrf54h
+            cmd: clippy -p nrf-802154-sys --features nrf54h --target thumbv8m.main-none-eabihf
+
+          # The high-level driver, one entry per supported chip.
+          - name: nrf52805
+            cmd: clippy -p nrf-802154 --features nrf52805
+          - name: nrf52810
+            cmd: clippy -p nrf-802154 --features nrf52810
+          - name: nrf52811
+            cmd: clippy -p nrf-802154 --features nrf52811
+          - name: nrf52820
+            cmd: clippy -p nrf-802154 --features nrf52820
+          - name: nrf52832
+            cmd: clippy -p nrf-802154 --features nrf52832
+          - name: nrf52833
+            cmd: clippy -p nrf-802154 --features nrf52833
+          - name: nrf52840
+            cmd: clippy -p nrf-802154 --features nrf52840
+          - name: nrf5340-net
+            cmd: clippy -p nrf-802154 --features nrf5340-net --target thumbv8m.main-none-eabi
+          - name: nrf54l05-app-s
+            cmd: clippy -p nrf-802154 --features nrf54l05-app-s --target thumbv8m.main-none-eabihf
+          - name: nrf54l10-app-s
+            cmd: clippy -p nrf-802154 --features nrf54l10-app-s --target thumbv8m.main-none-eabihf
+          - name: nrf54l10-app-ns
+            cmd: clippy -p nrf-802154 --features nrf54l10-app-ns --target thumbv8m.main-none-eabihf
+          - name: nrf54l15-app-s
+            cmd: clippy -p nrf-802154 --features nrf54l15-app-s --target thumbv8m.main-none-eabihf
+          - name: nrf54l15-app-ns
+            cmd: clippy -p nrf-802154 --features nrf54l15-app-ns --target thumbv8m.main-none-eabihf
+          - name: nrf54lm20-app-s
+            cmd: clippy -p nrf-802154 --features nrf54lm20-app-s --target thumbv8m.main-none-eabihf
+          - name: nrf52840 defmt+openthread
+            cmd: clippy -p nrf-802154 --features nrf52840,defmt,openthread
+          - name: nrf54l15-app-s defmt+openthread
+            cmd: clippy -p nrf-802154 --features nrf54l15-app-s,defmt,openthread --target thumbv8m.main-none-eabihf
+
+          # The IEEE 802.15.4 examples crate (full compilation including
+          # linking). The chip is selected by a feature; nRF52840 is the
+          # default.
+          - name: examples nrf52840
+            cmd: build -p nrf-802154-examples --target thumbv7em-none-eabi
+          - name: examples nrf54l15
+            cmd: build -p nrf-802154-examples --no-default-features --features nrf54l15 --target thumbv8m.main-none-eabihf
+          - name: examples nrf54lm20
+            cmd: build -p nrf-802154-examples --no-default-features --features nrf54lm20 --target thumbv8m.main-none-eabihf
+
+          # The OpenThread HIL test node (`tests/`, the `cli_node` firmware
+          # driven by the `openthread` repo's upstream-suite harness). The
+          # target is passed explicitly because the crate's own
+          # `.cargo/config.toml` only applies when building from within its
+          # directory.
+          # Both console bindings: a UART by default (a board reached through a
+          # debug probe's UART bridge), and the board's own USB peripheral under
+          # `console-usb`.
+          - name: cli_node nrf52840
+            cmd: clippy -p nrf-802154-tests --target thumbv7em-none-eabi
+          - name: cli_node nrf52840 console-usb
+            cmd: clippy -p nrf-802154-tests --features console-usb --target thumbv7em-none-eabi
+          - name: cli_node nrf54l15
+            cmd: clippy -p nrf-802154-tests --no-default-features --features nrf54l15 --target thumbv8m.main-none-eabihf
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install clippy
+        run: rustup component add clippy
+      - name: Install targets
+        run: rustup target add thumbv7em-none-eabi thumbv7em-none-eabihf thumbv8m.main-none-eabi thumbv8m.main-none-eabihf
+      - name: cargo ${{ matrix.cmd }}
+        run: cargo ${{ matrix.cmd }}
+
+  size-reports:
+    name: Size reports
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Install nightly
-        run: rustup toolchain add --component=rustfmt nightly
-      - name: Install clippy
-        run: rustup component add clippy
       - name: Install targets
-        run: rustup target add thumbv7em-none-eabi thumbv7em-none-eabihf thumbv8m.main-none-eabi thumbv8m.main-none-eabihf
-      - name: Formatting
-        run: cargo +nightly fmt -- --check
-      - name: Checks
-        run: ./ci.sh
+        run: rustup target add thumbv7em-none-eabi
       # Release builds (workspace profile: opt-level=z, fat LTO) feeding the
-      # flash/RAM size reports below. `cli_node` is already built in release
-      # by ci.sh.
-      - name: Build examples (release, for size reporting)
-        run: cargo build -p nrf-802154-examples --release --target thumbv7em-none-eabi
+      # flash/RAM size reports below.
+      - name: Build examples and the HIL test node (release, for size reporting)
+        run: |
+          cargo build -p nrf-802154-examples --release --target thumbv7em-none-eabi
+          cargo build -p nrf-802154-tests --release --target thumbv7em-none-eabi
       - name: Set up environment for size reports
         uses: ./.github/actions/setup-size-reports
         if: ${{ !env.ACT }}
@@ -49,3 +148,15 @@ jobs:
         if: ${{ !env.ACT }}
         with:
           platform-name: nrf52
+
+  # A single job to require in branch protection, so that the matrix above can
+  # grow and shrink without the required-checks list having to follow it.
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    needs: [fmt, check, size-reports]
+    if: always()
+    steps:
+      - name: Check that all jobs succeeded
+        run: |
+          [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "false" ]
