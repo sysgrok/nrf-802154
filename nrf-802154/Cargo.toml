@@ -51,7 +51,7 @@ log = ["dep:log", "nrf-mpsl/log"]
 [dependencies]
 defmt = { version = "1", optional = true }
 log = { version = "0.4", optional = true }
-openthread = { version = "0.2", optional = true }
+openthread = { version = "0.3", optional = true }
 nrf-mpsl = "0.3"
 nrf-802154-sys = { version = "0.1", path = "../nrf-802154-sys" }
 embassy-nrf = { version = "0.11", features = ["unstable-pac"] }

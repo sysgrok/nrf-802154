@@ -46,12 +46,12 @@ nrf54l15 = [
 ]
 
 [dependencies]
-nrf-802154 = { path = "../nrf-802154", version = "0.1", default-features = false, features = ["defmt", "openthread"] }
-nrf-mpsl = { version = "0.3.0", default-features = false, features = ["critical-section-impl"] }
+nrf-802154 = { path = "../nrf-802154", version = "0.1", features = ["nrf52840", "defmt", "openthread"] }
+nrf-mpsl = { version = "0.3", features = ["nrf52840", "critical-section-impl"] }
 
 # The same feature set the `openthread` repo's DUTs are built with, so the
 # harness meets the same CLI surface on this tier too.
-openthread = { version = "0.2", default-features = false, features = [
+openthread = { version = "0.3", default-features = false, features = [
     "defmt",
     "ftd",
     "cli",

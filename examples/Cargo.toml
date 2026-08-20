@@ -82,17 +82,13 @@ harness = false
 required-features = ["nrf52840"]
 
 [dependencies]
-nrf-802154 = { path = "../nrf-802154", version = "0.1", default-features = false, features = ["defmt", "openthread"] }
-nrf-mpsl = { version = "0.3.0", default-features = false, features = ["critical-section-impl"] }
-# trouble-host 0.7's `Runner` references central HCI commands (scan/connect) and
-# uses extended advertising even for a peripheral-only app, so the prebuilt SDC
-# lib must be the `multirole` one — i.e. both `peripheral` and `central` enabled.
-# The peripheral-only lib lacks e.g. `sdc_hci_cmd_le_set_ext_adv_enable`.
-nrf-sdc = { version = "0.4.0", default-features = false, features = ["peripheral", "central", "defmt"] }
+nrf-802154 = { path = "../nrf-802154", version = "0.1", features = ["nrf52840", "defmt", "openthread"] }
+nrf-mpsl = { version = "0.3", features = ["nrf52840", "critical-section-impl"] }
+nrf-sdc = { version = "0.4", default-features = false, features = ["peripheral", "central", "defmt"] }
 trouble-host = { version = "0.7", default-features = false, features = ["defmt", "gatt", "peripheral", "default-packet-pool"] }
 bt-hci = { version = "0.9", features = ["defmt"] }
 
-openthread = { version = "0.2", features = ["udp", "srp", "embassy-net-driver-channel", "defmt"] }
+openthread = { version = "0.3", features = ["udp", "srp", "embassy-net-driver-channel", "defmt"] }
 tinyrlibc = { version = "0.5", default-features = false, features = ["alloc", "strstr", "strcmp", "isupper", "utoa", "strtoul"] }
 embedded-alloc = "0.7.0"
 
