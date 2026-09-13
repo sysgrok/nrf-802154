@@ -1,9 +1,14 @@
 //! IEEE 802.15.4 packet sniffer.
 //!
 //! This example captures all IEEE 802.15.4 frames on a given channel (default: 15)
-//! and prints the raw frame bytes via defmt/RTT. Run with a RTT viewer to see the output.
+//! and prints each one via defmt/RTT: capture time (us), length, frame control
+//! field, sequence number, RSSI and the raw bytes. Run with a RTT viewer to see
+//! the output. ACKs are captured too, so a frame's sequence number followed by
+//! an ACK with the same number is an acknowledged frame, and the gap between
+//! their capture times a coarse view of the ACK spacing.
 //!
-//! Similar to `receive_all_frames` but outputs raw frame bytes suited for analysis.
+//! Similar to `receive_all_frames` but outputs raw frame bytes suited for
+//! analysis. Thread's test networks live on channel 11.
 
 #![no_std]
 #![no_main]
@@ -11,6 +16,7 @@
 use defmt::info;
 
 use embassy_executor::Spawner;
+use embassy_time::Instant;
 
 use embedded_alloc::LlffHeap as Heap;
 
@@ -71,7 +77,23 @@ async fn main(spawner: Spawner) {
     loop {
         match radio.receive(&mut buf).await {
             Ok(meta) => {
-                info!("@RAW {:?}", &buf[..meta.len as usize]);
+                let t = Instant::now().as_micros();
+                let len = meta.len as usize;
+                let fcf = if len >= 2 {
+                    u16::from_le_bytes([buf[0], buf[1]])
+                } else {
+                    0
+                };
+                let seq = if len >= 3 { buf[2] } else { 0 };
+                info!(
+                    "@{=u64}us len={} fcf={=u16:04x} seq={} rssi={} {=[u8]:02x}",
+                    t,
+                    len,
+                    fcf,
+                    seq,
+                    meta.power,
+                    &buf[..len]
+                );
             }
             Err(e) => {
                 info!("Receive error: {:?}", e);

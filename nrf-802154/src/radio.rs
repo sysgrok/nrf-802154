@@ -499,6 +499,8 @@ impl<'d> Radio<'d> {
     pub async fn receive(&mut self, buf: &mut [u8]) -> Result<PsduMeta, Error> {
         DBG_RX_ENTER.fetch_add(1, Ordering::Relaxed);
 
+        crate::platform::refresh_temperature();
+
         // Fast path: a frame may already be queued — the C driver auto-enters RX
         // after a transmit (rx_on_when_idle=true), so responses can arrive before
         // the next receive() call. Also clear any stale TX/CCA `status` now that
@@ -560,6 +562,8 @@ impl<'d> Radio<'d> {
         mut ack_buf: Option<&mut [u8]>,
     ) -> Result<Option<PsduMeta>, Error> {
         DBG_TX_ENTER.fetch_add(1, Ordering::Relaxed);
+
+        crate::platform::refresh_temperature();
 
         if data.len() > MAX_PSDU_SIZE {
             return Err(Error::TransmitDataTooLarge);
@@ -666,6 +670,8 @@ impl<'d> Radio<'d> {
         mut ack_buf: Option<&mut [u8]>,
     ) -> Result<Option<PsduMeta>, Error> {
         DBG_TX_ENTER.fetch_add(1, Ordering::Relaxed);
+
+        crate::platform::refresh_temperature();
 
         if data.len() > MAX_PSDU_SIZE {
             return Err(Error::TransmitDataTooLarge);

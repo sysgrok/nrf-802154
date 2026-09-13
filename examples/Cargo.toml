@@ -58,6 +58,10 @@ name = "sniffer"
 path = "src/bin/sniffer.rs"
 
 [[bin]]
+name = "ack_probe"
+path = "src/bin/ack_probe.rs"
+
+[[bin]]
 name = "reinit"
 path = "src/bin/reinit.rs"
 
