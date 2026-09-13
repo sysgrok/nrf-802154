@@ -62,4 +62,14 @@ impl<'d> RadioPeripherals<'d> {
             lp_timer,
         }
     }
+
+    /// Reborrow the peripherals for a shorter lifetime, so the same set can
+    /// back one [`Radio`](crate::Radio) after another.
+    pub fn reborrow(&mut self) -> RadioPeripherals<'_> {
+        RadioPeripherals {
+            egu: self.egu.reborrow(),
+            hp_timer: self.hp_timer.reborrow(),
+            lp_timer: self.lp_timer.reborrow(),
+        }
+    }
 }

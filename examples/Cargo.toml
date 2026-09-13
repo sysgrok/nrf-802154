@@ -58,6 +58,10 @@ name = "sniffer"
 path = "src/bin/sniffer.rs"
 
 [[bin]]
+name = "reinit"
+path = "src/bin/reinit.rs"
+
+[[bin]]
 name = "basic_udp"
 path = "src/bin/basic_udp.rs"
 harness = false

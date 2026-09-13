@@ -219,6 +219,10 @@ fn bindgen(target: &Target) -> bindgen::Builder {
         .clang_arg("-DNRF_802154_REQUEST_IMPL=0")
         // SWI notifications — see the CMAKE_C_FLAGS comment in `build()`.
         .clang_arg("-DNRF_802154_NOTIFICATION_IMPL=1")
+        // `nrf_802154_reinit`: what the `nrf-802154` crate resets the driver
+        // with between `Radio` instances (`nrf_802154_deinit` is deprecated
+        // upstream as unsafe to call).
+        .clang_arg("-DNRF_802154_DRV_REINIT_ENABLED=1")
         .clang_arg(&nrf_802154_egu_instance_workaround)
         .clang_args(series_extra_defines().iter().copied())
         .clang_args(target.core.map(|x| format!("-D{}", x)))
@@ -304,7 +308,7 @@ fn build(target: &Target) {
         .define(
             "CMAKE_C_FLAGS",
             format!(
-                "-Werror=implicit-function-declaration -fshort-enums -DCONFIG_MPSL -DNRF_802154_INTERNAL_SWI_IRQ_HANDLING=0 -DNRF_802154_REQUEST_IMPL=0 -DNRF_802154_NOTIFICATION_IMPL=1 {} {} {}",
+                "-Werror=implicit-function-declaration -fshort-enums -DCONFIG_MPSL -DNRF_802154_INTERNAL_SWI_IRQ_HANDLING=0 -DNRF_802154_REQUEST_IMPL=0 -DNRF_802154_NOTIFICATION_IMPL=1 -DNRF_802154_DRV_REINIT_ENABLED=1 {} {} {}",
                 nrf_802154_egu_instance_workaround, nrf_target_args, include_paths_args
             ),
         )
