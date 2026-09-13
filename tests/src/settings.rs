@@ -26,11 +26,13 @@
 //! a bad checksum from a torn write - reads as an empty store.
 
 use core::cell::RefCell;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::signal::Signal;
+use embassy_time::{Duration, Timer};
 
 use embedded_storage_async::nor_flash::NorFlash;
 
@@ -74,6 +76,10 @@ pub struct FlashSettingsState {
     dirty: Signal<CriticalSectionRawMutex, ()>,
     /// Wakes `flush` waiters.
     persisted: Signal<CriticalSectionRawMutex, ()>,
+    /// Set while a `flush` is waiting: persist now, skip the settle delay.
+    flush_pending: AtomicBool,
+    /// Wakes the persist task out of its settle delay.
+    flush_now: Signal<CriticalSectionRawMutex, ()>,
 }
 
 impl FlashSettingsState {
@@ -85,6 +91,8 @@ impl FlashSettingsState {
             persisted_gen: AtomicU32::new(0),
             dirty: Signal::new(),
             persisted: Signal::new(),
+            flush_pending: AtomicBool::new(false),
+            flush_now: Signal::new(),
         }
     }
 
@@ -146,6 +154,9 @@ impl FlashSettings {
 /// the mutable [`FlashSettings`] handle itself is owned by the OpenThread
 /// instance.
 pub async fn flush(state: &FlashSettingsState) {
+    state.flush_pending.store(true, Ordering::Relaxed);
+    state.flush_now.signal(());
+
     loop {
         let dirty = state.dirty_gen.load(Ordering::Relaxed);
         if state.persisted_gen.load(Ordering::Relaxed) >= dirty {
@@ -154,7 +165,19 @@ pub async fn flush(state: &FlashSettingsState) {
 
         state.persisted.wait().await;
     }
+
+    state.flush_pending.store(false, Ordering::Relaxed);
 }
+
+/// How long the persist task lets a mutation settle before writing it out.
+///
+/// Persisting costs the radio: the page erase (~85 ms on nRF52) runs in MPSL
+/// timeslots the 802.15.4 driver has to vacate, and a peer gives up on a
+/// frame after four attempts spanning ~30 ms. Mutations arrive in bursts
+/// (an attach, a key change) and the traffic they trigger follows at once -
+/// a key change is answered with a ping in the certification scripts - so
+/// the write waits for that to pass. `flush` skips the wait.
+const PERSIST_SETTLE: Duration = Duration::from_millis(500);
 
 impl Settings for FlashSettings {
     fn init(&mut self, sensitive_keys: &[u16]) {
@@ -218,6 +241,10 @@ pub async fn run(state: &'static FlashSettingsState, mut flash: Flash<'static>, 
 
     loop {
         state.dirty.wait().await;
+
+        if !state.flush_pending.load(Ordering::Relaxed) {
+            let _ = select(Timer::after(PERSIST_SETTLE), state.flush_now.wait()).await;
+        }
 
         // The generation this pass covers; anything newer re-raises `dirty`.
         let dirty_gen = state.dirty_gen.load(Ordering::Relaxed);

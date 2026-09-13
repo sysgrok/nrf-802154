@@ -1,6 +1,7 @@
 //! IEEE 802.15.4 packet sniffer.
 //!
-//! This example captures all IEEE 802.15.4 frames on a given channel (default: 15)
+//! This example captures all IEEE 802.15.4 frames on a given channel (`SNIFFER_CHANNEL` at
+//! build time; default: 15)
 //! and prints each one via defmt/RTT: capture time (us), length, frame control
 //! field, sequence number, RSSI and the raw bytes. Run with a RTT viewer to see
 //! the output. ACKs are captured too, so a frame's sequence number followed by
@@ -29,7 +30,31 @@ use static_cell::StaticCell;
 
 use {defmt_rtt as _, panic_probe as _};
 
-const CHANNEL: u8 = 15;
+/// The channel to listen on: `SNIFFER_CHANNEL` at build time, 15 (the channel the other
+/// examples use) when unset. Thread's test networks live on 11.
+const CHANNEL: u8 = match option_env!("SNIFFER_CHANNEL") {
+    Some(channel) => parse_channel(channel),
+    None => 15,
+};
+
+const fn parse_channel(s: &str) -> u8 {
+    let bytes = s.as_bytes();
+    let mut channel = 0u8;
+    let mut i = 0;
+    while i < bytes.len() {
+        assert!(
+            bytes[i].is_ascii_digit(),
+            "SNIFFER_CHANNEL must be a number"
+        );
+        channel = channel * 10 + (bytes[i] - b'0');
+        i += 1;
+    }
+    assert!(
+        channel >= 11 && channel <= 26,
+        "SNIFFER_CHANNEL must be 11..=26"
+    );
+    channel
+}
 
 static MPSL: StaticCell<MultiprotocolServiceLayer<'static>> = StaticCell::new();
 
