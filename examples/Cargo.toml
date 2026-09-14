@@ -90,29 +90,31 @@ harness = false
 required-features = ["nrf52840"]
 
 [dependencies]
-nrf-802154 = { path = "../nrf-802154", version = "0.1", features = ["defmt", "openthread"] }
-nrf-mpsl = { version = "0.4", features = ["critical-section-impl"] }
-nrf-sdc = { version = "0.4", default-features = false, features = ["peripheral", "central", "defmt"] }
-trouble-host = { version = "0.8", default-features = false, features = ["defmt", "gatt", "peripheral", "default-packet-pool"] }
-bt-hci = { version = "0.10", features = ["defmt"] }
+nrf-802154 = { workspace = true, default-features = false, features = ["defmt", "openthread"] }
+nrf-mpsl = { workspace = true, default-features = false, features = ["critical-section-impl"] }
+nrf-sdc = { workspace = true, default-features = false, features = ["peripheral", "central", "defmt"] }
+trouble-host = { workspace = true, default-features = false, features = ["defmt", "gatt", "peripheral", "default-packet-pool"] }
+bt-hci = { workspace = true, default-features = false, features = ["defmt"] }
 
-openthread = { version = "0.3", features = ["udp", "srp", "embassy-net-driver-channel", "defmt"] }
-tinyrlibc = { version = "0.5", default-features = false, features = ["alloc", "strstr", "strcmp", "isupper", "utoa", "strtoul"] }
-embedded-alloc = "0.7.0"
+# `matter` is the feature bundle the crate's prebuilt OpenThread libraries are
+# built with; without it, the examples would build OpenThread from source.
+openthread = { workspace = true, default-features = false, features = ["matter", "udp", "srp", "embassy-net-driver-channel", "defmt"] }
+tinyrlibc = { workspace = true, default-features = false, features = ["alloc", "strstr", "strcmp", "isupper", "utoa", "strtoul"] }
+embedded-alloc = { workspace = true }
 
-embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
-embassy-nrf = { version = "0.11", default-features = false, features = ["unstable-pac", "time"] }
-embassy-sync = { version = "0.8", features = ["defmt"] }
-embassy-futures = "0.1"
-embassy-time = { version = "0.5", features = ["defmt"] }
-embassy-net = { version = "0.8", features = ["defmt", "proto-ipv6", "medium-ip", "udp"] }
+embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "defmt"] }
+embassy-nrf = { workspace = true, default-features = false, features = ["unstable-pac", "time"] }
+embassy-sync = { workspace = true, default-features = false, features = ["defmt"] }
+embassy-futures = { workspace = true, default-features = false }
+embassy-time = { workspace = true, default-features = false, features = ["defmt"] }
+embassy-net = { workspace = true, default-features = false, features = ["defmt", "proto-ipv6", "medium-ip", "udp"] }
 
-defmt = "1"
-defmt-rtt = "1"
+defmt = { workspace = true, default-features = false }
+defmt-rtt = { workspace = true, default-features = false }
 
-cortex-m = "0.7"
-cortex-m-rt = "0.7"
-panic-probe = { version = "1", features = ["print-defmt"] }
-static_cell = "2"
-heapless = "0.8"
-rand_core = "0.9"
+cortex-m = { workspace = true, default-features = false }
+cortex-m-rt = { workspace = true, default-features = false }
+panic-probe = { workspace = true, default-features = false, features = ["print-defmt"] }
+static_cell = { workspace = true, default-features = false }
+heapless = { workspace = true, default-features = false }
+rand_core = { workspace = true, default-features = false }

@@ -144,9 +144,6 @@ nrf54l-s = []
 nrf54lm20-s = []
 nrf54h = []
 
-#[dependencies]
-#nrf-mpsl-sys = "0.2.0"
-
 [build-dependencies]
 bindgen = "0.72"
 doxygen-rs = "0.4.2"
