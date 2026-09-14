@@ -11,13 +11,16 @@
 //! extra wrinkle that the GRTC sits in a different peripheral domain from the
 //! radio, so events have to be bridged across with PPIB.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicI8, AtomicU32, Ordering};
 
 use core::cell::Cell;
 
 use cortex_m::interrupt::InterruptNumber as _;
 use critical_section::Mutex;
 use embassy_nrf::interrupt::typelevel::{Handler, Interrupt};
+
+use nrf_802154_sys as sys;
 
 use crate::mpsl;
 
@@ -79,22 +82,88 @@ impl Handler<EguIrq> for EguInterruptHandler {
 // =============================================================================
 // Temperature
 //
-// Delegates to MPSL's temperature sensor which reads the on-chip TEMP peripheral.
-// MPSL returns temperature in units of 0.25°C; the 802.15.4 driver expects integer °C.
+// The driver asks for the temperature from inside its radio interrupt - it
+// corrects RSSI and LQI while preparing the ACK for a just-received frame,
+// with ~130 us in total between the end of that frame and the moment the
+// ACK has to start - so the hook has to answer from a cache. Measuring is
+// MPSL's job (it owns the TEMP peripheral): `mpsl_temperature_get` blocks for
+// ~50 us and is only allowed at MPSL's low-priority level, i.e. from the
+// executor thread. The cache is filled at init and refreshed from the
+// thread-context entry points of `Radio` (see `refresh_temperature`), paced
+// by the driver's own clock so that no time source of ours is needed.
+//
+// MPSL returns 0.25°C units; the driver expects integer °C.
 // =============================================================================
 
+/// The cached die temperature, in °C. Until measured, a plausible room value.
+static TEMPERATURE: AtomicI8 = AtomicI8::new(20);
+
+/// When the cache was last refreshed, in whole seconds of the driver's clock.
+static TEMPERATURE_MEASURED_AT: AtomicU32 = AtomicU32::new(0);
+
+/// How often the cache is refreshed, in seconds. The die temperature drifts
+/// slowly and the corrections it feeds are coarse (a dB per several degrees).
+const TEMPERATURE_REFRESH_PERIOD_S: u32 = 10;
+
+extern "C" {
+    // The driver's notification that the temperature it last read is stale
+    // (declared in the SL's `platform/nrf_802154_temperature.h`, which is
+    // outside the bindgen set).
+    fn nrf_802154_temperature_changed();
+}
+
+/// Measures the temperature through MPSL. Thread context only (blocking).
+fn measure_temperature() -> i8 {
+    let raw = unsafe { mpsl::raw::mpsl_temperature_get() };
+    // Clamp to i8 range in case MPSL returns an out-of-range or error value.
+    (raw / 4).clamp(i8::MIN as i32, i8::MAX as i32) as i8
+}
+
+/// Refreshes the cached temperature if the refresh period has elapsed on the
+/// driver's clock (as seen through its last frame timestamps; nothing to do
+/// while no frame has gone out or come in). Thread context only.
+pub(crate) fn refresh_temperature() {
+    let mut timestamps = MaybeUninit::<sys::nrf_802154_stat_timestamps_t>::uninit();
+    let timestamps = unsafe {
+        sys::nrf_802154_stat_timestamps_get(timestamps.as_mut_ptr());
+        timestamps.assume_init()
+    };
+
+    let now_us = timestamps
+        .last_rx_end_timestamp
+        .max(timestamps.last_tx_end_timestamp);
+    if now_us == sys::NRF_802154_NO_TIMESTAMP as u64 {
+        return;
+    }
+
+    let now_s = (now_us / 1_000_000) as u32;
+    if now_s.wrapping_sub(TEMPERATURE_MEASURED_AT.load(Ordering::Relaxed))
+        < TEMPERATURE_REFRESH_PERIOD_S
+    {
+        return;
+    }
+
+    let temperature = measure_temperature();
+    TEMPERATURE_MEASURED_AT.store(now_s, Ordering::Relaxed);
+
+    if TEMPERATURE.swap(temperature, Ordering::Relaxed) != temperature {
+        unsafe { nrf_802154_temperature_changed() };
+    }
+}
+
 #[no_mangle]
-extern "C" fn nrf_802154_temperature_init() {}
+extern "C" fn nrf_802154_temperature_init() {
+    // Called from `nrf_802154_init`, i.e. from `Radio::new` on the thread
+    TEMPERATURE.store(measure_temperature(), Ordering::Relaxed);
+    TEMPERATURE_MEASURED_AT.store(0, Ordering::Relaxed);
+}
 
 #[no_mangle]
 extern "C" fn nrf_802154_temperature_deinit() {}
 
 #[no_mangle]
 extern "C" fn nrf_802154_temperature_get() -> i8 {
-    let raw = unsafe { mpsl::raw::mpsl_temperature_get() };
-    // MPSL returns 0.25°C units; convert to integer °C and clamp to i8 range
-    // in case MPSL returns an out-of-range or error value.
-    (raw / 4).clamp(i8::MIN as i32, i8::MAX as i32) as i8
+    TEMPERATURE.load(Ordering::Relaxed)
 }
 
 // =============================================================================

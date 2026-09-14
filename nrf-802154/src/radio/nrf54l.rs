@@ -90,4 +90,20 @@ impl<'d> RadioPeripherals<'d> {
             ppib21_ch2,
         }
     }
+
+    /// Reborrow the peripherals for a shorter lifetime, so the same set can
+    /// back one [`Radio`](crate::Radio) after another.
+    pub fn reborrow(&mut self) -> RadioPeripherals<'_> {
+        RadioPeripherals {
+            grtc_ch3: self.grtc_ch3.reborrow(),
+            grtc_ch4: self.grtc_ch4.reborrow(),
+            grtc_ch5: self.grtc_ch5.reborrow(),
+            ppi20_ch2: self.ppi20_ch2.reborrow(),
+            ppi20_ch3: self.ppi20_ch3.reborrow(),
+            ppib11_ch1: self.ppib11_ch1.reborrow(),
+            ppib21_ch1: self.ppib21_ch1.reborrow(),
+            ppib11_ch2: self.ppib11_ch2.reborrow(),
+            ppib21_ch2: self.ppib21_ch2.reborrow(),
+        }
+    }
 }

@@ -230,8 +230,14 @@ impl<'d> Radio<'d> {
         _irq: I,
         _mpsl: &'d nrf_mpsl::MultiprotocolServiceLayer<'_>,
     ) -> Self {
-        unsafe {
-            raw::nrf_802154_init();
+        if INITIALIZED.swap(true, Ordering::SeqCst) {
+            // The previous instance's teardown reset the driver; do it again
+            // in case that reset found the radio busy
+            reset_driver();
+        } else {
+            unsafe {
+                raw::nrf_802154_init();
+            }
         }
 
         unsafe {
@@ -493,6 +499,8 @@ impl<'d> Radio<'d> {
     pub async fn receive(&mut self, buf: &mut [u8]) -> Result<PsduMeta, Error> {
         DBG_RX_ENTER.fetch_add(1, Ordering::Relaxed);
 
+        crate::platform::refresh_temperature();
+
         // Fast path: a frame may already be queued — the C driver auto-enters RX
         // after a transmit (rx_on_when_idle=true), so responses can arrive before
         // the next receive() call. Also clear any stale TX/CCA `status` now that
@@ -554,6 +562,8 @@ impl<'d> Radio<'d> {
         mut ack_buf: Option<&mut [u8]>,
     ) -> Result<Option<PsduMeta>, Error> {
         DBG_TX_ENTER.fetch_add(1, Ordering::Relaxed);
+
+        crate::platform::refresh_temperature();
 
         if data.len() > MAX_PSDU_SIZE {
             return Err(Error::TransmitDataTooLarge);
@@ -660,6 +670,8 @@ impl<'d> Radio<'d> {
         mut ack_buf: Option<&mut [u8]>,
     ) -> Result<Option<PsduMeta>, Error> {
         DBG_TX_ENTER.fetch_add(1, Ordering::Relaxed);
+
+        crate::platform::refresh_temperature();
 
         if data.len() > MAX_PSDU_SIZE {
             return Err(Error::TransmitDataTooLarge);
@@ -939,15 +951,33 @@ impl Drop for Radio<'_> {
     fn drop(&mut self) {
         self.disable();
 
-        unsafe {
-            raw::nrf_802154_deinit();
-        }
-
-        STATE.lock(|state| {
-            let mut state = state.borrow_mut();
-            state.status = RadioStatus::Idle;
-        });
+        // Not `nrf_802154_deinit`: upstream deprecated it as unsafe to call
+        // (nrfxlib 3.4.0). The driver stays initialized for the whole boot
+        // and is reset instead.
+        reset_driver();
     }
+}
+
+/// Whether `nrf_802154_init` has run. The C driver is initialized once per
+/// boot; every later `Radio` starts from a [`reset_driver`] instead.
+static INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// Resets the driver to its post-init defaults with the radio asleep: ongoing
+/// and delayed operations cancelled, pending notifications flushed, security
+/// keys, pending-bit tables and RX buffers cleared - and drops this crate's
+/// view of them along with it.
+fn reset_driver() {
+    if !unsafe { raw::nrf_802154_reinit() } {
+        warn!("nrf_802154 reinit failed (radio busy); the next `Radio` retries");
+    }
+
+    TX_BUSY.store(false, Ordering::SeqCst);
+    STATE.lock(|state| {
+        let mut state = state.borrow_mut();
+        state.status = RadioStatus::Idle;
+        state.tx_result = None;
+        state.rx_queue.clear();
+    });
 }
 
 // TODO: Think if we need `nrf_802154_state_t`
@@ -1026,6 +1056,12 @@ impl RxQueue {
             received: 0,
             dropped: 0,
         }
+    }
+
+    /// Drop every queued frame (the diagnostic counters stay).
+    fn clear(&mut self) {
+        self.head = 0;
+        self.len = 0;
     }
 
     /// Reserve the next free slot and return a mutable reference to fill it, or
