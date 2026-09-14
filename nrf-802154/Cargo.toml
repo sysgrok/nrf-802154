@@ -49,12 +49,12 @@ defmt = ["dep:defmt", "nrf-mpsl/defmt"]
 log = ["dep:log", "nrf-mpsl/log"]
 
 [dependencies]
-defmt = { version = "1", optional = true }
-log = { version = "0.4", optional = true }
-openthread = { version = "0.3", optional = true }
-nrf-mpsl = "0.4"
-nrf-802154-sys = { version = "0.1", path = "../nrf-802154-sys" }
-embassy-nrf = { version = "0.11", features = ["unstable-pac"] }
-embassy-sync = "0.8"
-critical-section = "1.2"
-cortex-m = "0.7"
+defmt = { workspace = true, default-features = false, optional = true }
+log = { workspace = true, default-features = false, optional = true }
+openthread = { workspace = true, default-features = false, optional = true }
+nrf-mpsl = { workspace = true, default-features = false }
+nrf-802154-sys = { workspace = true, default-features = false }
+embassy-nrf = { workspace = true, default-features = false, features = ["unstable-pac"] }
+embassy-sync = { workspace = true, default-features = false }
+critical-section = { workspace = true, default-features = false }
+cortex-m = { workspace = true, default-features = false }

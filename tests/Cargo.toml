@@ -46,12 +46,12 @@ nrf54l15 = [
 ]
 
 [dependencies]
-nrf-802154 = { path = "../nrf-802154", version = "0.1", features = ["defmt", "openthread"] }
-nrf-mpsl = { version = "0.4", features = ["critical-section-impl"] }
+nrf-802154 = { workspace = true, default-features = false, features = ["defmt", "openthread"] }
+nrf-mpsl = { workspace = true, default-features = false, features = ["critical-section-impl"] }
 
 # The same feature set the `openthread` repo's DUTs are built with, so the
 # harness meets the same CLI surface on this tier too.
-openthread = { version = "0.3", default-features = false, features = [
+openthread = { workspace = true, default-features = false, features = [
     "defmt",
     "ftd",
     "cli",
@@ -86,7 +86,7 @@ openthread = { version = "0.3", default-features = false, features = [
 # Only the pure-Rust pieces the C CLI references - NOT `all`, which pulls
 # tinyrlibc's vendored C printf and with it a C cross-compiler, for a
 # `vsnprintf` nobody needs (the `openthread` build carries nanoprintf).
-tinyrlibc = { version = "0.5", default-features = false, features = [
+tinyrlibc = { workspace = true, default-features = false, features = [
     "alloc",
     "abs",
     "atoi",
@@ -112,24 +112,24 @@ tinyrlibc = { version = "0.5", default-features = false, features = [
     "strtol",
     "strtoul",
 ] }
-embedded-alloc = "0.7.0"
-embedded-storage-async = "0.4.1"
+embedded-alloc = { workspace = true }
+embedded-storage-async = { workspace = true }
 
-embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
-embassy-nrf = { version = "0.11", default-features = false, features = ["unstable-pac", "time"] }
-embassy-sync = { version = "0.8", features = ["defmt"] }
-embassy-futures = "0.1"
-embassy-time = { version = "0.5", features = ["defmt"] }
-embassy-usb = { version = "0.5", features = ["defmt"], optional = true }
+embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "defmt"] }
+embassy-nrf = { workspace = true, default-features = false, features = ["unstable-pac", "time"] }
+embassy-sync = { workspace = true, features = ["defmt"] }
+embassy-futures = { workspace = true }
+embassy-time = { workspace = true, features = ["defmt"] }
+embassy-usb = { workspace = true, features = ["defmt"], optional = true }
 
-defmt = "1"
-defmt-rtt = "1"
+defmt = { workspace = true }
+defmt-rtt = { workspace = true }
 
-cortex-m = "0.7"
-cortex-m-rt = "0.7"
-panic-probe = { version = "1", features = ["print-defmt"] }
-static_cell = "2"
-heapless = "0.9"
-rand_core = "0.9"
-critical-section = "1.2"
-portable-atomic = { version = "1", features = ["critical-section"] }
+cortex-m = { workspace = true }
+cortex-m-rt = { workspace = true }
+panic-probe = { workspace = true, features = ["print-defmt"] }
+static_cell = { workspace = true }
+heapless = { workspace = true }
+rand_core = { workspace = true }
+critical-section = { workspace = true }
+portable-atomic = { workspace = true, features = ["critical-section"] }

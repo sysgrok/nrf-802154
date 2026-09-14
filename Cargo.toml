@@ -19,6 +19,41 @@ lto = 'fat'
 opt-level = 'z'
 overflow-checks = false
 
-[patch.crates-io]
+[workspace.dependencies]
+# The crates
+nrf-802154 = { version = "0.1", path = "nrf-802154", default-features = false }
+nrf-802154-sys = { version = "0.1", path = "nrf-802154-sys", default-features = false }
+
+# The dependencies
+defmt = { version = "1", default-features = false }
+log = { version = "0.4", default-features = false }
+openthread = { version = "0.4", default-features = false }
+nrf-mpsl = { version = "0.4", default-features = false }
+embassy-nrf = { version = "0.11", default-features = false }
+embassy-sync = { version = "0.8", default-features = false }
+critical-section = { version = "1.2", default-features = false }
+cortex-m = { version = "0.7", default-features = false }
+
+# Test / dev dependencies
+nrf-sdc = { version = "0.4", default-features = false }
+trouble-host = { version = "0.8", default-features = false }
+bt-hci = { version = "0.10", default-features = false }
+tinyrlibc = { version = "0.5", default-features = false, features = ["alloc", "strstr", "strcmp", "isupper", "utoa", "strtoul"] }
+embedded-alloc = { version = "0.7", default-features = false, features = ["llff"] }
+embedded-storage-async = { version = "0.4.1", default-features = false }
+embassy-executor = { version = "0.10", default-features = false }
+embassy-futures = { version = "0.1", default-features = false }
+embassy-time = { version = "0.5", default-features = false }
+embassy-usb = { version = "0.5", default-features = false }
+embassy-net = { version = "0.9", default-features = false }
+defmt-rtt = { version = "1", default-features = false }
+cortex-m-rt = { version = "0.7", default-features = false }
+panic-probe = { version = "1", default-features = false }
+static_cell = { version = "2", default-features = false }
+heapless = { version = "0.9", default-features = false }
+rand_core = { version = "0.9", default-features = false }
+portable-atomic = { version = "1", default-features = false }
+
+#[patch.crates-io]
 #openthread = { git = "https://github.com/esp-rs/openthread" }
 #openthread-sys = { git = "https://github.com/esp-rs/openthread" }
