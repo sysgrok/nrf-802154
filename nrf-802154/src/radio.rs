@@ -1,6 +1,6 @@
 use core::cell::RefCell;
 use core::marker::PhantomData;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use embassy_nrf::Peri;
 use embassy_sync::blocking_mutex;
@@ -93,6 +93,10 @@ pub enum Error {
     Transmit(TxError),
     /// Reception failed (CRC error, aborted, etc)
     Receive,
+    /// Could not schedule a timed receive window (see [`Radio::receive_at`])
+    ScheduleReceive,
+    /// The driver rejected a MAC key (see [`Radio::set_mac_keys`])
+    Security(raw::nrf_802154_security_error_t),
 }
 
 /// Clear Channel Assessment method
@@ -153,8 +157,148 @@ pub struct PsduMeta {
     pub power: i8,
     /// Link Quality Indicator of the received frame
     pub lqi: Option<u8>,
-    /// Timestamp taken when the last symbol of the frame was received
+    /// Timestamp taken when the last symbol of the frame was received, in
+    /// microseconds of the driver clock ([`Radio::now_us`])
     pub time: Option<u64>,
+    /// The security material of the *secured enhanced ACK* the driver sent for
+    /// this frame, if it sent one (see [`AckSecurity`]).
+    pub ack_security: Option<AckSecurity>,
+}
+
+impl PsduMeta {
+    /// The time the start of the frame's PHR was at the antenna (i.e. the end
+    /// of its SFD), in microseconds of the driver clock, derived from
+    /// [`time`](Self::time): the PHR byte and the PSDU (with its FCS) each take
+    /// 32 µs on the air.
+    pub fn phr_time(&self) -> Option<u64> {
+        const SYMBOLS_PER_BYTE: u64 = 2;
+        const US_PER_SYMBOL: u64 = 16;
+
+        self.time.map(|end| {
+            let bytes = 1 /* PHR */ + self.len as u64 + 2 /* FCS */;
+
+            end.saturating_sub(bytes * SYMBOLS_PER_BYTE * US_PER_SYMBOL)
+        })
+    }
+}
+
+/// The security material the driver used for a secured enhanced ACK it sent
+/// in response to a received frame.
+///
+/// A frame secured by the peer (e.g. a Thread 1.2 parent transmitting to a
+/// CSL child) is acknowledged with a secured enhanced ACK, which consumes a
+/// MAC frame counter of *this* node. The stack, which secures the data frames
+/// with the same key in software, has to know each counter the ACKs used up -
+/// see the frame-counter feedback of the OpenThread radio platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct AckSecurity {
+    /// The frame counter of the ACK.
+    pub frame_counter: u32,
+    /// The key index (key ID mode 1) the ACK was secured with; `0` for another
+    /// key ID mode.
+    pub key_id: u8,
+}
+
+/// A MAC key handed to the driver for securing its enhanced ACKs.
+#[derive(Clone, Copy)]
+pub struct MacKey {
+    /// The key index (key ID mode 1).
+    pub key_id: u8,
+    /// The key.
+    pub key: [u8; 16],
+}
+
+/// The security material of the enhanced ACK the driver is currently sending
+/// (`nrf_802154_tx_ack_started`), handed over to the received frame the ACK
+/// is for (`nrf_802154_received[_timestamp]_raw`, which the driver reports once
+/// the ACK is out). Atomics rather than the `RadioState` lock, because the
+/// ACK-started callout runs from the radio IRQ, which the lock does not mask.
+static ACK_SEC_PENDING: AtomicBool = AtomicBool::new(false);
+/// Whether a timed receive window is scheduled (see [`Radio::receive_at`]).
+static RX_WINDOW_SCHEDULED: AtomicBool = AtomicBool::new(false);
+static ACK_SEC_FRAME_COUNTER: AtomicU32 = AtomicU32::new(0);
+static ACK_SEC_KEY_ID: AtomicU8 = AtomicU8::new(0);
+
+/// Take the security material of the enhanced ACK just sent, if any.
+fn take_ack_security() -> Option<AckSecurity> {
+    ACK_SEC_PENDING
+        .swap(false, Ordering::AcqRel)
+        .then(|| AckSecurity {
+            frame_counter: ACK_SEC_FRAME_COUNTER.load(Ordering::Relaxed),
+            key_id: ACK_SEC_KEY_ID.load(Ordering::Relaxed),
+        })
+}
+
+/// Parse the auxiliary security header of an ACK frame (PHR + PSDU), returning
+/// its frame counter and key index if the ACK is a secured enhanced ACK whose
+/// frame counter is not suppressed.
+fn parse_ack_security(frame: &[u8]) -> Option<AckSecurity> {
+    const FRAME_TYPE_ACK: u16 = 2;
+    const FRAME_VERSION_2015: u16 = 2;
+
+    let psdu = frame.get(1..)?;
+    let fcf = u16::from_le_bytes([*psdu.first()?, *psdu.get(1)?]);
+
+    if fcf & 0x7 != FRAME_TYPE_ACK || fcf & (1 << 3) == 0 || (fcf >> 12) & 0x3 != FRAME_VERSION_2015
+    {
+        return None;
+    }
+
+    let pan_id_compression = fcf & (1 << 6) != 0;
+    let seq_suppressed = fcf & (1 << 8) != 0;
+    let dst_mode = (fcf >> 10) & 0x3;
+    let src_mode = (fcf >> 14) & 0x3;
+
+    let addr_len = |mode: u16| match mode {
+        2 => 2,
+        3 => 8,
+        _ => 0,
+    };
+
+    // IEEE 802.15.4-2015, table 7-2: the PAN ID fields present for a version-2
+    // frame, as a function of the address modes and the PAN ID compression bit.
+    let (dst_pan, src_pan) = match (dst_mode != 0, src_mode != 0, pan_id_compression) {
+        (false, false, false) => (false, false),
+        (false, false, true) => (true, false),
+        (true, false, false) => (true, false),
+        (true, false, true) => (false, false),
+        (false, true, false) => (false, true),
+        (false, true, true) => (false, false),
+        (true, true, false) if dst_mode == 3 && src_mode == 3 => (true, false),
+        (true, true, true) if dst_mode == 3 && src_mode == 3 => (false, false),
+        (true, true, false) => (true, true),
+        (true, true, true) => (true, false),
+    };
+
+    let mut offset = 2 + if seq_suppressed { 0 } else { 1 };
+    offset += if dst_pan { 2 } else { 0 } + addr_len(dst_mode);
+    offset += if src_pan { 2 } else { 0 } + addr_len(src_mode);
+
+    let sec_ctrl = *psdu.get(offset)?;
+    offset += 1;
+
+    let key_id_mode = (sec_ctrl >> 3) & 0x3;
+    let frame_counter_suppressed = sec_ctrl & (1 << 5) != 0;
+
+    if frame_counter_suppressed {
+        return None;
+    }
+
+    let fc = psdu.get(offset..offset + 4)?;
+    let frame_counter = u32::from_le_bytes([fc[0], fc[1], fc[2], fc[3]]);
+    offset += 4;
+
+    let key_id = if key_id_mode == 1 {
+        *psdu.get(offset)?
+    } else {
+        0
+    };
+
+    Some(AckSecurity {
+        frame_counter,
+        key_id,
+    })
 }
 
 /// IEEE 802.15.4 radio driver.
@@ -412,6 +556,8 @@ impl<'d> Radio<'d> {
     /// Returns `false` if the driver refused the transition (an operation is
     /// in progress).
     pub fn sleep(&mut self) -> bool {
+        self.receive_at_cancel();
+
         unsafe { raw::nrf_802154_sleep() }
     }
 
@@ -421,6 +567,8 @@ impl<'d> Radio<'d> {
     ///
     /// Returns `false` if the driver refused the transition.
     pub fn enter_receive(&mut self) -> bool {
+        self.receive_at_cancel();
+
         unsafe { raw::nrf_802154_receive() }
     }
 
@@ -481,6 +629,146 @@ impl<'d> Radio<'d> {
     /// Move the radio from any state to the DISABLED state
     fn disable(&mut self) {
         // TODO: Is this even supported in the C driver?
+    }
+
+    /// The driver clock, in microseconds: the time base of the frame
+    /// timestamps ([`PsduMeta::time`]), of the timed receive windows
+    /// ([`receive_at`](Self::receive_at)) and of the CSL anchor time.
+    pub fn now_us(&self) -> u64 {
+        unsafe { raw::nrf_802154_time_get() }
+    }
+
+    /// Schedule a receive window: the receiver goes on for `channel` at
+    /// `start_us` ([`now_us`](Self::now_us) time base) and off again after
+    /// `duration_us`, unless a frame is being received then. Frames received
+    /// in the window land in the RX queue, to be drained with
+    /// [`wait_frame`](Self::wait_frame) - not [`receive`](Self::receive), which
+    /// would switch the receiver on for good.
+    ///
+    /// This is how a Thread CSL child samples the channel at its parent's
+    /// transmit times without polling. One window at a time: scheduling a new
+    /// one cancels a still pending one.
+    ///
+    /// Returns `false` if the driver could not schedule the window (too late,
+    /// or the timeslot could not be reserved).
+    pub fn receive_at(&mut self, start_us: u64, duration_us: u32, channel: u8) -> bool {
+        self.receive_at_cancel();
+
+        // Any id below the driver's reserved range will do; one window at a
+        // time keeps it unambiguous.
+        const RX_WINDOW_ID: u32 = 1;
+
+        let scheduled =
+            unsafe { raw::nrf_802154_receive_at(start_us, duration_us, channel, RX_WINDOW_ID) };
+
+        if scheduled {
+            RX_WINDOW_SCHEDULED.store(true, Ordering::Relaxed);
+        }
+
+        scheduled
+    }
+
+    /// Cancel the receive window scheduled by [`receive_at`](Self::receive_at),
+    /// if it has not started yet (a started one just runs to its end).
+    pub fn receive_at_cancel(&mut self) {
+        if RX_WINDOW_SCHEDULED.swap(false, Ordering::Relaxed) {
+            const RX_WINDOW_ID: u32 = 1;
+
+            unsafe {
+                raw::nrf_802154_receive_at_cancel(RX_WINDOW_ID);
+            }
+        }
+    }
+
+    /// Move the radio to the SLEEP state unless an operation is in progress
+    /// (in which case nothing changes and `false` is returned). Unlike
+    /// [`sleep`](Self::sleep), a scheduled receive window is left alone.
+    pub fn sleep_if_idle(&mut self) -> bool {
+        unsafe {
+            raw::nrf_802154_sleep_if_idle()
+                == raw::NRF_802154_SLEEP_ERROR_NONE as raw::nrf_802154_sleep_error_t
+        }
+    }
+
+    /// Wait for a received frame and drain the oldest one into `buf`, without
+    /// changing the radio state - the counterpart of
+    /// [`receive`](Self::receive) for a receiver that is on by a timed window
+    /// ([`receive_at`](Self::receive_at)), or on by itself
+    /// (`rx_when_idle`).
+    pub async fn wait_frame(&mut self, buf: &mut [u8]) -> PsduMeta {
+        crate::platform::refresh_temperature();
+
+        RadioState::wait(|state| state.rx_queue.dequeue_into(buf)).await
+    }
+
+    /// Set the CSL period the driver advertises in the CSL IE of its enhanced
+    /// ACKs, in units of 10 symbols (160 µs); `0` stops injecting the IE.
+    ///
+    /// Together with the anchor time
+    /// ([`set_csl_anchor_time`](Self::set_csl_anchor_time)) this is what tells
+    /// a Thread 1.2 parent when this CSL child listens next.
+    pub fn set_csl_period(&mut self, period: u16) {
+        unsafe { raw::nrf_802154_csl_writer_period_set(period) }
+    }
+
+    /// Set the CSL anchor time: the time of the next receive window (the start
+    /// of its SHR), in the [`now_us`](Self::now_us) time base. The driver
+    /// computes the CSL phase of each enhanced ACK from it.
+    pub fn set_csl_anchor_time(&mut self, anchor_us: u64) {
+        unsafe { raw::nrf_802154_csl_writer_anchor_time_set(anchor_us) }
+    }
+
+    /// Replace the MAC keys the driver secures its enhanced ACKs with (key ID
+    /// mode `key_id_mode`, one entry per key index). All keys use the global
+    /// frame counter ([`set_frame_counter`](Self::set_frame_counter)).
+    ///
+    /// The driver copies the key material.
+    pub fn set_mac_keys(&mut self, key_id_mode: u8, keys: &[MacKey]) -> Result<(), Error> {
+        self.clear_mac_keys();
+
+        for key in keys {
+            let mut key_material = key.key;
+            let mut key_id = key.key_id;
+
+            let mut entry = raw::nrf_802154_key_t {
+                value: raw::nrf_802154_key_t__bindgen_ty_1 {
+                    p_cleartext_key: key_material.as_mut_ptr(),
+                },
+                id: raw::nrf_802154_key_id_t {
+                    mode: key_id_mode,
+                    p_key_id: &mut key_id,
+                },
+                type_: raw::NRF_802154_KEY_CLEARTEXT as raw::nrf_802154_key_type_t,
+                frame_counter: 0,
+                use_global_frame_counter: true,
+            };
+
+            let result = unsafe { raw::nrf_802154_security_key_store(&mut entry) };
+
+            if result != raw::NRF_802154_SECURITY_ERROR_NONE as raw::nrf_802154_security_error_t {
+                return Err(Error::Security(result));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Remove all MAC keys from the driver.
+    pub fn clear_mac_keys(&mut self) {
+        unsafe { raw::nrf_802154_security_key_remove_all() }
+    }
+
+    /// Set the global MAC frame counter the driver secures its next enhanced
+    /// ACK with - unconditionally, or only if `frame_counter` is larger than
+    /// the current one (`if_larger`).
+    pub fn set_frame_counter(&mut self, frame_counter: u32, if_larger: bool) {
+        unsafe {
+            if if_larger {
+                raw::nrf_802154_security_global_frame_counter_set_if_larger(frame_counter)
+            } else {
+                raw::nrf_802154_security_global_frame_counter_set(frame_counter)
+            }
+        }
     }
 
     /// Receive one radio packet
@@ -1027,6 +1315,7 @@ impl RxFrame {
             power: 0,
             lqi: None,
             time: None,
+            ack_security: None,
         },
         data: [0; MAX_PACKET_SIZE],
     };
@@ -1184,15 +1473,28 @@ unsafe extern "C" fn nrf_802154_energy_detection_failed(error: raw::nrf_802154_e
 }
 
 #[no_mangle]
-unsafe extern "C" fn nrf_802154_tx_ack_started() {
-    // No-op: unlike the notification callbacks (`received_raw`, `cca_done`,
-    // ... — deferred to the maskable EGU/SWI priority via
+unsafe extern "C" fn nrf_802154_tx_ack_started(p_data: *const u8) {
+    // Unlike the notification callbacks (`received_raw`, `cca_done`, ... -
+    // deferred to the maskable EGU/SWI priority via
     // `NRF_802154_NOTIFICATION_IMPL=1` in the sys build), this is a *direct*
     // core callout from the high-priority radio IRQ, which the
     // `CriticalSectionRawMutex` does not mask. It MUST NOT touch the
-    // `RefCell`-protected `RadioState` — doing so races with a `STATE.lock()`
-    // held by the executor and panics with "already borrowed". The information
-    // (we started auto-ACKing a received frame) isn't needed by the driver.
+    // `RefCell`-protected `RadioState` - doing so races with a `STATE.lock()`
+    // held by the executor and panics with "already borrowed". Hence the
+    // atomics: the ACK's security material is picked up by the received-frame
+    // notification for the frame this ACK answers, which the driver issues
+    // once the ACK is out.
+    let phr = unsafe { *p_data };
+    let frame = unsafe { core::slice::from_raw_parts(p_data, phr as usize + 1) };
+
+    match parse_ack_security(frame) {
+        Some(sec) => {
+            ACK_SEC_FRAME_COUNTER.store(sec.frame_counter, Ordering::Relaxed);
+            ACK_SEC_KEY_ID.store(sec.key_id, Ordering::Relaxed);
+            ACK_SEC_PENDING.store(true, Ordering::Release);
+        }
+        None => ACK_SEC_PENDING.store(false, Ordering::Release),
+    }
 }
 
 #[no_mangle]
@@ -1211,6 +1513,7 @@ unsafe extern "C" fn nrf_802154_received_raw(p_data: *mut u8, power: i8, lqi: u8
                     power,
                     lqi: Some(lqi),
                     time: None,
+                    ack_security: take_ack_security(),
                 };
             }
             // else: queue full — drop the frame (counted in `rx_queue.dropped`).
@@ -1244,6 +1547,7 @@ unsafe extern "C" fn nrf_802154_received_timestamp_raw(
                     power,
                     lqi: Some(lqi),
                     time: Some(time),
+                    ack_security: take_ack_security(),
                 };
             }
             // else: queue full — drop the frame (counted in `rx_queue.dropped`).
@@ -1296,6 +1600,8 @@ unsafe extern "C" fn nrf_802154_transmitted_raw(
                     power: p_metadata.data.transmitted.power,
                     lqi: Some(p_metadata.data.transmitted.lqi),
                     time: Some(p_metadata.data.transmitted.time),
+                    // An ACK we received, not one we sent.
+                    ack_security: None,
                 })));
             } else {
                 state.tx_result = Some(TxResult::Done(None));
