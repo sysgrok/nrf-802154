@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 * Breaking: CSL (Thread 1.2 Synchronized Sleepy End Device) support in `OpenThreadRadio`
 * Breaking: `Radio`: everything necessary for Thread CSL support - scheduled receival and enhanced ACKs
+* `Radio::sleep` / `enter_receive` no longer cancel a scheduled receive window; `receive_at_cancel` does
+* Fix: a captured ACK was one byte short (the driver reports its PSDU length, not the buffer length), which made every secured enhanced ACK fail its MIC check
 
 ## [0.1.0] - 2026-09-14
 

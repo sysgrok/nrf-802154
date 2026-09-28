@@ -37,8 +37,8 @@ impl openthread::RadioError for Error {
 }
 
 impl PsduMeta {
-    fn as_openthread(&self, channel: u8) -> openthread::PsduMeta {
-        openthread::PsduMeta {
+    fn as_openthread(&self, channel: u8) -> openthread::PsduRxInfo {
+        openthread::PsduRxInfo {
             len: self.len as usize + 2,
             channel,
             rssi: Some(self.power),
@@ -185,7 +185,11 @@ impl openthread::Radio for OpenThreadRadio<'_> {
                 // timestamps and enhanced-ACK security with the CSL IE: the
                 // driver has it all, so this node can be a CSL (Synchronized)
                 // Sleepy End Device.
-                .union(openthread::Capabilities::RECEIVE_TIMING),
+                .union(openthread::Capabilities::RECEIVE_TIMING)
+                // The driver finishes the frames it sends: frame counter and
+                // CSL IE written at transmit time (its security and IE
+                // writers), AES-CCM* with the keys from `set_mac_keys`.
+                .union(openthread::Capabilities::TRANSMIT_SEC),
             // Full MAC offload: auto-ACK, address filtering, ACK handling
             // and the source-match table (the ACKs' pending bit consults the
             // driver's pending-bit lists, see `set_src_match_config`) are all
@@ -259,10 +263,12 @@ impl openthread::Radio for OpenThreadRadio<'_> {
     }
 
     async fn set_sleep(&mut self) -> Result<(), Self::Error> {
-        if core::mem::take(&mut self.timed_rx) {
-            // The end of a timed window: the driver sleeps by itself once the
-            // window is over, and a frame may be arriving right now - do not
-            // abort it. `sleep_if_idle` refusing (busy) is then fine.
+        if core::mem::take(&mut self.timed_rx) || self.radio.has_pending_window() {
+            // A timed window is pending or just ran: the driver sleeps by
+            // itself between and after windows, and a frame may be arriving
+            // right now - do not abort it. `sleep_if_idle` refusing (busy) is
+            // then fine. OpenThread asks for sleep freely (after every
+            // operation), so this is the common case for a CSL child.
             self.radio.sleep_if_idle();
 
             return Ok(());
@@ -288,7 +294,29 @@ impl openthread::Radio for OpenThreadRadio<'_> {
             self.radio.set_channel(channel);
         }
 
-        if !self.radio.receive_at(start_us, duration_us, channel) {
+        // The driver refuses a start that is not comfortably ahead of its
+        // clock, and OpenThread's request may have aged on its way here. Trim
+        // a window whose start has (nearly) passed rather than lose it - the
+        // frame is still expected in its remaining part.
+        const MIN_LEAD_US: u64 = 250;
+
+        let now = self.radio.now_us();
+        let end_us = start_us + duration_us as u64;
+        let start_us = start_us.max(now + MIN_LEAD_US);
+
+        if end_us <= start_us + MIN_LEAD_US {
+            debug!(
+                "Timed receive window missed: it ended {} us before it could be armed",
+                (now + MIN_LEAD_US).saturating_sub(end_us)
+            );
+
+            return Err(Error::ScheduleReceive);
+        }
+
+        if !self
+            .radio
+            .receive_at(start_us, (end_us - start_us) as u32, channel)
+        {
             return Err(Error::ScheduleReceive);
         }
 
@@ -300,6 +328,22 @@ impl openthread::Radio for OpenThreadRadio<'_> {
     }
 
     async fn set_csl(&mut self, csl: &openthread::CslConfig) -> Result<(), Self::Error> {
+        let peer_changed =
+            self.csl.short_addr != csl.short_addr || self.csl.ext_addr != csl.ext_addr;
+
+        // The parent learns this node's receive schedule from the CSL IE in
+        // the enhanced ACKs it gets back, so the IE is injected for exactly
+        // the current parent, under both of its addresses.
+        if self.csl.enabled() && (!csl.enabled() || peer_changed) {
+            self.radio
+                .clear_csl_ie_peer(Some(self.csl.short_addr), Some(self.csl.ext_addr));
+        }
+
+        if !csl.enabled() {
+            // No more windows to keep: whatever is scheduled is stale.
+            self.radio.receive_at_cancel();
+        }
+
         if self.csl.period != csl.period {
             // OpenThread's period is in the same 10-symbol units; it caps it
             // at `u16::MAX` itself.
@@ -307,13 +351,20 @@ impl openthread::Radio for OpenThreadRadio<'_> {
                 .set_csl_period(csl.period.min(u16::MAX as u32) as u16);
         }
 
-        if csl.enabled() && (self.csl.sample_time_us != csl.sample_time_us || !self.csl.enabled()) {
-            // OpenThread hands out the low 32 bits of the radio clock and the
-            // start of the receive window; the driver wants the full time of
-            // the frame's SHR, which starts one preamble + SFD (5 bytes, 160 µs)
-            // before the PHR the window is timed for.
-            const SHR_US: u64 = 5 * 2 * 16;
+        if csl.enabled()
+            && (!self.csl.enabled() || peer_changed)
+            && !self
+                .radio
+                .set_csl_ie_peer(Some(csl.short_addr), Some(csl.ext_addr))
+        {
+            warn!("CSL IE not injected into enhanced ACKs: the driver's ACK data table is full");
+        }
 
+        if csl.enabled() && (self.csl.sample_time_us != csl.sample_time_us || !self.csl.enabled()) {
+            // OpenThread hands out the low 32 bits of the radio clock; widen it
+            // against the current time. Its sample time is the expected time
+            // of the first symbol of the frame's MHR, which is exactly the
+            // driver's definition of the anchor (the time of CSL phase zero).
             let now = self.radio.now_us();
             let offset = csl.sample_time_us.wrapping_sub(now as u32);
             let sample_time = if offset < 0x80000000 {
@@ -322,8 +373,7 @@ impl openthread::Radio for OpenThreadRadio<'_> {
                 now.saturating_sub((u32::MAX - offset + 1) as u64)
             };
 
-            self.radio
-                .set_csl_anchor_time(sample_time.saturating_sub(SHR_US));
+            self.radio.set_csl_anchor_time(sample_time);
         }
 
         self.csl = *csl;
@@ -373,12 +423,13 @@ impl openthread::Radio for OpenThreadRadio<'_> {
 
     async fn transmit(
         &mut self,
-        psdu: &[u8],
+        psdu: &mut [u8],
+        psdu_tx: &mut openthread::PsduTxInfo,
         channel: u8,
         power: i8,
         cca_threshold: Option<i8>,
         mut ack_psdu_buf: Option<&mut [u8]>,
-    ) -> Result<Option<openthread::PsduMeta>, Self::Error> {
+    ) -> Result<Option<openthread::PsduRxInfo>, Self::Error> {
         if psdu.len() > MAX_PSDU_SIZE + 2
         /* + FCS */
         {
@@ -401,11 +452,23 @@ impl openthread::Radio for OpenThreadRadio<'_> {
             self.radio.set_tx_power(power);
         }
 
-        let data = &psdu[..psdu.len() - 2];
+        let len = psdu.len();
+        let data = &mut psdu[..len - 2];
         let ack = ack_psdu_buf.as_mut().map(|ack_psdu_buf| {
             let len = ack_psdu_buf.len();
             &mut ack_psdu_buf[..len - 2]
         });
+
+        // What the driver still has to do to the frame before it goes out
+        // (`TRANSMIT_SEC`): assign the frame counter and fill the CSL IE unless
+        // the header is final already (a retransmission), and secure it unless
+        // it is secured already. The driver does that in place, in its own
+        // buffer, and the finished frame is copied back below.
+        let props = crate::FrameProps {
+            is_secured: psdu_tx.security_processed,
+            dynamic_data_is_set: psdu_tx.header_updated,
+        };
+        let finishes_header = !psdu_tx.header_updated;
 
         // We advertise `Capabilities::CSMA_BACKOFF`, so OpenThread expects the
         // radio to perform CSMA-CA channel access itself when it requests it
@@ -418,10 +481,14 @@ impl openthread::Radio for OpenThreadRadio<'_> {
                 self.radio.set_cca(crate::Cca::ed_from_dbm(threshold));
             }
 
-            Radio::transmit_csma_ca(&mut self.radio, data, ack).await?
+            Radio::transmit_csma_ca_with(&mut self.radio, data, props, ack).await?
         } else {
-            Radio::transmit(&mut self.radio, data, false, ack).await?
+            Radio::transmit_with(&mut self.radio, data, props, false, ack).await?
         };
+
+        if finishes_header {
+            psdu_tx.header_updated = true;
+        }
 
         Ok(if let Some(meta) = meta {
             if let Some(ack_psdu_buf) = ack_psdu_buf {
@@ -434,7 +501,10 @@ impl openthread::Radio for OpenThreadRadio<'_> {
         })
     }
 
-    async fn receive(&mut self, psdu_buf: &mut [u8]) -> Result<openthread::PsduMeta, Self::Error> {
+    async fn receive(
+        &mut self,
+        psdu_buf: &mut [u8],
+    ) -> Result<openthread::PsduRxInfo, Self::Error> {
         if psdu_buf.len() < MAX_PSDU_SIZE + 2
         /* + FCS */
         {

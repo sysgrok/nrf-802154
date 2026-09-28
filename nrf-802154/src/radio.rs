@@ -182,6 +182,32 @@ impl PsduMeta {
     }
 }
 
+/// What the driver still has to do to a frame before transmitting it.
+///
+/// The driver can finish a frame itself: assign the frame counter and the
+/// key index, fill the CSL IE (if the frame carries one) with the phase of the
+/// next receive window as of the moment the frame goes on the air, and secure
+/// it (AES-CCM*) with a key from [`Radio::set_mac_keys`]. A caller that did all
+/// of that already passes [`FrameProps::PREPARED`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct FrameProps {
+    /// The frame is already secured (MIC computed, payload encrypted), or
+    /// needs no security. When `false` the driver secures it.
+    pub is_secured: bool,
+    /// The frame counter, key index and CSL IE are already final. When `false`
+    /// the driver assigns them.
+    pub dynamic_data_is_set: bool,
+}
+
+impl FrameProps {
+    /// A frame the caller has fully prepared: the driver sends it as is.
+    pub const PREPARED: Self = Self {
+        is_secured: true,
+        dynamic_data_is_set: true,
+    };
+}
+
 /// The security material the driver used for a secured enhanced ACK it sent
 /// in response to a received frame.
 ///
@@ -217,6 +243,11 @@ pub struct MacKey {
 static ACK_SEC_PENDING: AtomicBool = AtomicBool::new(false);
 /// Whether a timed receive window is scheduled (see [`Radio::receive_at`]).
 static RX_WINDOW_SCHEDULED: AtomicBool = AtomicBool::new(false);
+
+/// The id of the one timed receive window ([`Radio::receive_at`]) in flight:
+/// any id below the driver's reserved range will do, and one window at a time
+/// keeps it unambiguous.
+const RX_WINDOW_ID: u32 = 1;
 static ACK_SEC_FRAME_COUNTER: AtomicU32 = AtomicU32::new(0);
 static ACK_SEC_KEY_ID: AtomicU8 = AtomicU8::new(0);
 
@@ -555,10 +586,18 @@ impl<'d> Radio<'d> {
     ///
     /// Returns `false` if the driver refused the transition (an operation is
     /// in progress).
+    ///
+    /// A receive window scheduled with [`receive_at`](Self::receive_at) is
+    /// left alone: it is a request for the future, and sleeping now is what a
+    /// node does between its windows.
     pub fn sleep(&mut self) -> bool {
-        self.receive_at_cancel();
-
         unsafe { raw::nrf_802154_sleep() }
+    }
+
+    /// Whether a receive window scheduled with
+    /// [`receive_at`](Self::receive_at) is still pending.
+    pub fn has_pending_window(&self) -> bool {
+        RX_WINDOW_SCHEDULED.load(Ordering::Relaxed)
     }
 
     /// Move the radio to the RECEIVE state (the counterpart of
@@ -567,8 +606,6 @@ impl<'d> Radio<'d> {
     ///
     /// Returns `false` if the driver refused the transition.
     pub fn enter_receive(&mut self) -> bool {
-        self.receive_at_cancel();
-
         unsafe { raw::nrf_802154_receive() }
     }
 
@@ -654,12 +691,15 @@ impl<'d> Radio<'d> {
     pub fn receive_at(&mut self, start_us: u64, duration_us: u32, channel: u8) -> bool {
         self.receive_at_cancel();
 
-        // Any id below the driver's reserved range will do; one window at a
-        // time keeps it unambiguous.
-        const RX_WINDOW_ID: u32 = 1;
-
         let scheduled =
             unsafe { raw::nrf_802154_receive_at(start_us, duration_us, channel, RX_WINDOW_ID) };
+
+        trace!(
+            "nrf_802154 timed receive: in {} us for {} us -> {}",
+            start_us as i64 - self.now_us() as i64,
+            duration_us,
+            scheduled
+        );
 
         if scheduled {
             RX_WINDOW_SCHEDULED.store(true, Ordering::Relaxed);
@@ -672,8 +712,6 @@ impl<'d> Radio<'d> {
     /// if it has not started yet (a started one just runs to its end).
     pub fn receive_at_cancel(&mut self) {
         if RX_WINDOW_SCHEDULED.swap(false, Ordering::Relaxed) {
-            const RX_WINDOW_ID: u32 = 1;
-
             unsafe {
                 raw::nrf_802154_receive_at_cancel(RX_WINDOW_ID);
             }
@@ -711,11 +749,77 @@ impl<'d> Radio<'d> {
         unsafe { raw::nrf_802154_csl_writer_period_set(period) }
     }
 
-    /// Set the CSL anchor time: the time of the next receive window (the start
-    /// of its SHR), in the [`now_us`](Self::now_us) time base. The driver
-    /// computes the CSL phase of each enhanced ACK from it.
+    /// Set the CSL anchor time: a time at which the CSL phase is zero, i.e.
+    /// when the first bit of the MAC header of a frame from the parent is
+    /// expected in some receive window (past or future - the driver extends
+    /// it by whole periods), in the [`now_us`](Self::now_us) time base. The
+    /// driver computes the CSL phase of each enhanced ACK from it.
     pub fn set_csl_anchor_time(&mut self, anchor_us: u64) {
         unsafe { raw::nrf_802154_csl_writer_anchor_time_set(anchor_us) }
+    }
+
+    /// The CSL IE the driver injects into its enhanced ACKs: a header IE of
+    /// element ID `IE_CSL_ID` (0x1a) with 4 bytes of content - the phase and
+    /// the period - that the driver's IE writer fills in at ACK time.
+    const CSL_IE: [u8; 6] = [0x04, 0x0d, 0, 0, 0, 0];
+
+    /// Inject the CSL IE into the enhanced ACKs sent to the given peer (the
+    /// CSL parent), addressed by its short and/or extended address. Without
+    /// this the ACKs carry no CSL IE and the parent cannot keep its transmit
+    /// schedule in step with this node's receive windows.
+    ///
+    /// Returns `false` if the driver's ACK data table is full.
+    pub fn set_csl_ie_peer(&mut self, short_addr: Option<u16>, ext_addr: Option<u64>) -> bool {
+        let mut ok = true;
+
+        if let Some(short_addr) = short_addr {
+            ok &= unsafe {
+                raw::nrf_802154_ack_data_set(
+                    short_addr.to_le_bytes().as_ptr(),
+                    false,
+                    Self::CSL_IE.as_ptr() as *const _,
+                    Self::CSL_IE.len() as _,
+                    raw::NRF_802154_ACK_DATA_IE as raw::nrf_802154_ack_data_t,
+                )
+            };
+        }
+
+        if let Some(ext_addr) = ext_addr {
+            ok &= unsafe {
+                raw::nrf_802154_ack_data_set(
+                    ext_addr.to_le_bytes().as_ptr(),
+                    true,
+                    Self::CSL_IE.as_ptr() as *const _,
+                    Self::CSL_IE.len() as _,
+                    raw::NRF_802154_ACK_DATA_IE as raw::nrf_802154_ack_data_t,
+                )
+            };
+        }
+
+        ok
+    }
+
+    /// Stop injecting the CSL IE into the enhanced ACKs sent to the given peer.
+    pub fn clear_csl_ie_peer(&mut self, short_addr: Option<u16>, ext_addr: Option<u64>) {
+        if let Some(short_addr) = short_addr {
+            unsafe {
+                raw::nrf_802154_ack_data_clear(
+                    short_addr.to_le_bytes().as_ptr(),
+                    false,
+                    raw::NRF_802154_ACK_DATA_IE as raw::nrf_802154_ack_data_t,
+                );
+            }
+        }
+
+        if let Some(ext_addr) = ext_addr {
+            unsafe {
+                raw::nrf_802154_ack_data_clear(
+                    ext_addr.to_le_bytes().as_ptr(),
+                    true,
+                    raw::NRF_802154_ACK_DATA_IE as raw::nrf_802154_ack_data_t,
+                );
+            }
+        }
     }
 
     /// Replace the MAC keys the driver secures its enhanced ACKs with (key ID
@@ -847,6 +951,27 @@ impl<'d> Radio<'d> {
         &mut self,
         data: &[u8],
         cca: bool,
+        ack_buf: Option<&mut [u8]>,
+    ) -> Result<Option<PsduMeta>, Error> {
+        if data.len() > MAX_PSDU_SIZE {
+            return Err(Error::TransmitDataTooLarge);
+        }
+
+        let mut buf = [0; MAX_PSDU_SIZE];
+        buf[..data.len()].copy_from_slice(data);
+
+        self.transmit_with(&mut buf[..data.len()], FrameProps::PREPARED, cca, ack_buf)
+            .await
+    }
+
+    /// [`transmit`](Self::transmit), with the driver finishing the frame as
+    /// `props` says (see [`FrameProps`]). The frame as it went on the air is
+    /// written back into `data`.
+    pub async fn transmit_with(
+        &mut self,
+        data: &mut [u8],
+        props: FrameProps,
+        cca: bool,
         mut ack_buf: Option<&mut [u8]>,
     ) -> Result<Option<PsduMeta>, Error> {
         DBG_TX_ENTER.fetch_add(1, Ordering::Relaxed);
@@ -866,16 +991,10 @@ impl<'d> Radio<'d> {
         let (claim, packet_data) = TxClaim::claim(data).await;
 
         let metadata = raw::nrf_802154_transmit_metadata_t {
-            // The OpenThread integration never advertises `TRANSMIT_SEC`, so the
-            // stack performs all 802.15.4 MAC security (AES-CCM* encryption + MIC)
-            // and writes the frame counter IN SOFTWARE before handing us the PSDU.
-            // We must tell the driver the frame is already fully prepared, otherwise
-            // it tries to secure it itself, fails to find a stored key for the
-            // frame's key ID, and rejects the TX with `KEY_ID_INVALID`. (For frames
-            // with MAC security disabled these flags are simply ignored.)
+            // What is left for the driver to do to the frame: see `FrameProps`.
             frame_props: raw::nrf_802154_transmitted_frame_props_t {
-                is_secured: true,
-                dynamic_data_is_set: true,
+                is_secured: props.is_secured,
+                dynamic_data_is_set: props.dynamic_data_is_set,
             },
             cca,
             tx_power: raw::nrf_802154_tx_power_metadata_t {
@@ -931,7 +1050,7 @@ impl<'d> Radio<'d> {
 
         DBG_TX_SCHED.fetch_add(1, Ordering::Relaxed);
 
-        Self::wait_transmit_done(&mut ack_buf).await
+        Self::wait_transmit_done(&mut ack_buf, data).await
     }
 
     /// Transmit one radio packet using the CSMA-CA algorithm.
@@ -955,6 +1074,26 @@ impl<'d> Radio<'d> {
     pub async fn transmit_csma_ca(
         &mut self,
         data: &[u8],
+        ack_buf: Option<&mut [u8]>,
+    ) -> Result<Option<PsduMeta>, Error> {
+        if data.len() > MAX_PSDU_SIZE {
+            return Err(Error::TransmitDataTooLarge);
+        }
+
+        let mut buf = [0; MAX_PSDU_SIZE];
+        buf[..data.len()].copy_from_slice(data);
+
+        self.transmit_csma_ca_with(&mut buf[..data.len()], FrameProps::PREPARED, ack_buf)
+            .await
+    }
+
+    /// [`transmit_csma_ca`](Self::transmit_csma_ca), with the driver finishing
+    /// the frame as `props` says (see [`FrameProps`]). The frame as it went on
+    /// the air is written back into `data`.
+    pub async fn transmit_csma_ca_with(
+        &mut self,
+        data: &mut [u8],
+        props: FrameProps,
         mut ack_buf: Option<&mut [u8]>,
     ) -> Result<Option<PsduMeta>, Error> {
         DBG_TX_ENTER.fetch_add(1, Ordering::Relaxed);
@@ -974,13 +1113,10 @@ impl<'d> Radio<'d> {
         let (claim, packet_data) = TxClaim::claim(data).await;
 
         let metadata = raw::nrf_802154_transmit_csma_ca_metadata_t {
-            // See the note in `transmit`: OpenThread secures the frame in software
-            // (no `TRANSMIT_SEC` cap), so the PSDU is already encrypted with its
-            // frame counter set. Mark it as such, or the driver attempts its own
-            // security processing and rejects the TX with `KEY_ID_INVALID`.
+            // What is left for the driver to do to the frame: see `FrameProps`.
             frame_props: raw::nrf_802154_transmitted_frame_props_t {
-                is_secured: true,
-                dynamic_data_is_set: true,
+                is_secured: props.is_secured,
+                dynamic_data_is_set: props.dynamic_data_is_set,
             },
             tx_power: raw::nrf_802154_tx_power_metadata_t {
                 use_metadata_value: false,
@@ -1034,13 +1170,20 @@ impl<'d> Radio<'d> {
 
         DBG_TX_SCHED.fetch_add(1, Ordering::Relaxed);
 
-        Self::wait_transmit_done(&mut ack_buf).await
+        Self::wait_transmit_done(&mut ack_buf, data).await
     }
 
     async fn wait_transmit_done(
         ack_buf: &mut Option<&mut [u8]>,
+        data: &mut [u8],
     ) -> Result<Option<PsduMeta>, Error> {
         let tx_result = RadioState::wait(|state| {
+            if state.tx_result.is_some() {
+                // The frame as the driver finished it (frame counter, CSL IE,
+                // security), for a caller that left any of that to the driver.
+                data.copy_from_slice(&state.tx[1..][..data.len()]);
+            }
+
             if let Some(TxResult::Done(_)) = &state.tx_result {
                 if let Some(ack_buf) = ack_buf.as_mut() {
                     if let Some(TxResult::Done(Some(meta))) = state.tx_result {
@@ -1561,11 +1704,31 @@ unsafe extern "C" fn nrf_802154_received_timestamp_raw(
 }
 
 #[no_mangle]
-unsafe extern "C" fn nrf_802154_receive_failed(_error: raw::nrf_802154_rx_error_t, _id: u32) {
+unsafe extern "C" fn nrf_802154_receive_failed(error: raw::nrf_802154_rx_error_t, id: u32) {
     // A frame-level reception failure (CRC error, invalid frame, abort, ...). With
     // rx_on_when_idle the radio stays in RX, so we just drop the failed reception
     // and let `receive()` keep waiting for the next good frame, rather than
     // surfacing transient RX noise to OpenThread as a receive error.
+    //
+    // A timed window (`receive_at`) ends through here too: `DELAYED_TIMEOUT`
+    // is its normal, frame-less end; `DELAYED_TIMESLOT_DENIED` means the
+    // window was never opened (the scheduler refused the timeslot).
+    let delayed_timeout = raw::NRF_802154_RX_ERROR_DELAYED_TIMEOUT as raw::nrf_802154_rx_error_t;
+    let delayed_denied =
+        raw::NRF_802154_RX_ERROR_DELAYED_TIMESLOT_DENIED as raw::nrf_802154_rx_error_t;
+    let delayed_aborted = raw::NRF_802154_RX_ERROR_DELAYED_ABORTED as raw::nrf_802154_rx_error_t;
+
+    if id == RX_WINDOW_ID && error == delayed_timeout {
+        RX_WINDOW_SCHEDULED.store(false, Ordering::Relaxed);
+        trace!("nrf_802154 timed receive window ended without a frame");
+    } else if id == RX_WINDOW_ID && (error == delayed_denied || error == delayed_aborted) {
+        RX_WINDOW_SCHEDULED.store(false, Ordering::Relaxed);
+        debug!("nrf_802154 timed receive window failed: error {}", error);
+    } else {
+        // A frame that failed inside a window (or in plain RX): the window
+        // itself goes on.
+        trace!("nrf_802154 receive failed: error {}", error);
+    }
 }
 
 #[no_mangle]
@@ -1585,9 +1748,13 @@ unsafe extern "C" fn nrf_802154_transmitted_raw(
     RadioState::update(|state| {
         let p_metadata = unsafe { p_metadata.as_ref().unwrap() };
         if !p_metadata.data.transmitted.p_ack.is_null() {
-            let total = p_metadata.data.transmitted.length as usize;
+            // `length` is the ACK's PSDU length (the PHR value, FCS included),
+            // like a received frame's PHR; the buffer carries the PHR byte in
+            // front of it. Same layout as in `nrf_802154_received_timestamp_raw`.
+            let phr = p_metadata.data.transmitted.length;
+            let total = phr as usize + 1;
 
-            if (MIN_PHR as usize..=MAX_PACKET_SIZE).contains(&total) {
+            if phr >= MIN_PHR && total <= MAX_PACKET_SIZE {
                 let packet = unsafe {
                     core::slice::from_raw_parts(p_metadata.data.transmitted.p_ack, total)
                 };
@@ -1595,7 +1762,7 @@ unsafe extern "C" fn nrf_802154_transmitted_raw(
                 state.ack_rx[..total].copy_from_slice(packet);
 
                 state.tx_result = Some(TxResult::Done(Some(PsduMeta {
-                    len: (total - 1 - 2) as u8, // total - PHR - FCS
+                    len: phr - 2, // PHR value - FCS
                     crc: u16::from_le_bytes([state.ack_rx[total - 2], state.ack_rx[total - 1]]),
                     power: p_metadata.data.transmitted.power,
                     lqi: Some(p_metadata.data.transmitted.lqi),
