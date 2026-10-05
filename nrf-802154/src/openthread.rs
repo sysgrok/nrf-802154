@@ -87,6 +87,9 @@ pub struct OpenThreadRadio<'d> {
     /// Whether the receiver is currently commanded by a timed window
     /// (`receive_at`) rather than by `set_receive` / `set_sleep`.
     timed_rx: bool,
+    /// The channel of the last timed window, which frames received in it
+    /// arrived on.
+    window_channel: u8,
     /// The last CSL schedule applied to the driver.
     csl: openthread::CslConfig,
     /// The clock accuracy reported to a CSL parent, in PPM.
@@ -117,6 +120,7 @@ impl<'d> OpenThreadRadio<'d> {
             cca_threshold: Some(-75),
             csma_max_backoffs: None,
             timed_rx: false,
+            window_channel: 0,
             csl: openthread::CslConfig::new(),
             csl_accuracy_ppm: Self::DEFAULT_CSL_ACCURACY_PPM,
             csl_uncertainty: Self::DEFAULT_CSL_UNCERTAINTY,
@@ -213,6 +217,7 @@ impl openthread::Radio for OpenThreadRadio<'_> {
             clock: Some(openthread::RadioClock(radio_now_us)),
             csl_accuracy_ppm: self.csl_accuracy_ppm,
             csl_uncertainty: self.csl_uncertainty,
+            bus_speed: 0,
         })
     }
 
@@ -297,9 +302,10 @@ impl openthread::Radio for OpenThreadRadio<'_> {
         start_us: u64,
         duration_us: u32,
     ) -> Result<(), Self::Error> {
-        if self.radio.channel() != channel {
-            self.radio.set_channel(channel);
-        }
+        // The window carries its own channel, and the driver's channel - what
+        // it receives on otherwise, and returns to after transmitting - stays:
+        // retuning it here would abort a window still running.
+        self.window_channel = channel;
 
         // The driver refuses a start that is not comfortably ahead of its
         // clock, and OpenThread's request may have aged on its way here. Trim
@@ -347,8 +353,18 @@ impl openthread::Radio for OpenThreadRadio<'_> {
         }
 
         if !csl.enabled() {
-            // No more windows to keep: whatever is scheduled is stale.
+            // No more windows to keep: whatever is scheduled is stale. A window
+            // already running is not ended by the cancel - the radio stays in
+            // the receive state - and OpenThread does not ask for sleep after
+            // CSL either (a timed-receive radio sleeps by itself between its
+            // windows), so put it to sleep here.
+            let in_window = self.timed_rx;
+
             self.radio.receive_at_cancel();
+
+            if in_window {
+                self.radio.sleep_if_idle();
+            }
         }
 
         if self.csl.period != csl.period {
@@ -451,9 +467,10 @@ impl openthread::Radio for OpenThreadRadio<'_> {
             }
         }
 
-        if self.radio.channel() != channel {
-            self.radio.set_channel(channel);
-        }
+        // The frame goes out on its own channel; the driver's channel - which it
+        // receives on, and returns to afterwards - stays. Retuning it would
+        // abort a timed receive window (on a CSL channel) still running, and
+        // leave a CSL parent's receiver on its child's channel.
         if self.power != power {
             self.power = power;
             self.radio.set_tx_power(power);
@@ -503,7 +520,8 @@ impl openthread::Radio for OpenThreadRadio<'_> {
             .filter(|start_us| *start_us >= self.radio.now_us() + MIN_LEAD_US);
 
         let meta = if let Some(start_us) = tx_start_us {
-            Radio::transmit_at_with(&mut self.radio, data, props, start_us, cca, ack).await?
+            Radio::transmit_at_with(&mut self.radio, data, props, start_us, channel, cca, ack)
+                .await?
         } else if cca
             && psdu_tx.tx_at_us.is_none()
             && psdu_tx
@@ -520,23 +538,26 @@ impl openthread::Radio for OpenThreadRadio<'_> {
                 }
             }
 
-            Radio::transmit_csma_ca_with(&mut self.radio, data, props, ack).await?
+            Radio::transmit_csma_ca_with(&mut self.radio, data, props, channel, ack).await?
         } else {
             // No CCA, or a single one and no backoff (a late timed frame, or
             // OpenThread asking for no backoffs).
-            Radio::transmit_with(&mut self.radio, data, props, cca, ack).await?
+            Radio::transmit_with(&mut self.radio, data, props, channel, cca, ack).await?
         };
 
+        // The driver hands back the frame as it went on the air - with its
+        // header finished, and secured.
         if finishes_header {
             psdu_tx.header_updated = true;
         }
+        psdu_tx.security_processed = true;
 
         Ok(if let Some(meta) = meta {
             if let Some(ack_psdu_buf) = ack_psdu_buf {
                 meta.write_crc(ack_psdu_buf);
             }
 
-            Some(meta.as_openthread(self.radio.channel()))
+            Some(meta.as_openthread(channel))
         } else {
             None
         })
@@ -555,14 +576,21 @@ impl openthread::Radio for OpenThreadRadio<'_> {
         let len = psdu_buf.len();
         let meta = if self.timed_rx {
             // Inside a timed window (`receive_at`): just wait for the window's
-            // frames, the receiver is the driver's to run.
-            Radio::wait_frame(&mut self.radio, &mut psdu_buf[..len - 2]).await
+            // frames, the receiver is the driver's to run - and to put to sleep
+            // when the window ends.
+            Radio::wait_window_frame(&mut self.radio, &mut psdu_buf[..len - 2]).await
         } else {
             Radio::receive(&mut self.radio, &mut psdu_buf[..len - 2]).await?
         };
 
         meta.write_crc(psdu_buf);
 
-        Ok(meta.as_openthread(self.radio.channel()))
+        let channel = if self.timed_rx {
+            self.window_channel
+        } else {
+            self.radio.channel()
+        };
+
+        Ok(meta.as_openthread(channel))
     }
 }

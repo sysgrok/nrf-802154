@@ -243,6 +243,11 @@ pub struct MacKey {
 static ACK_SEC_PENDING: AtomicBool = AtomicBool::new(false);
 /// Whether a timed receive window is scheduled (see [`Radio::receive_at`]).
 static RX_WINDOW_SCHEDULED: AtomicBool = AtomicBool::new(false);
+/// Whether the timed receive window ended (or never opened) since it was
+/// scheduled: the driver leaves the radio in the receive state at the end of
+/// a window (`receive_at` is a delayed `receive`), so whoever drains the
+/// window puts it to sleep (see [`Radio::wait_window_frame`]).
+static RX_WINDOW_ENDED: AtomicBool = AtomicBool::new(false);
 
 /// The id of the one timed receive window ([`Radio::receive_at`]) in flight:
 /// any id below the driver's reserved range will do, and one window at a time
@@ -690,6 +695,7 @@ impl<'d> Radio<'d> {
     /// or the timeslot could not be reserved).
     pub fn receive_at(&mut self, start_us: u64, duration_us: u32, channel: u8) -> bool {
         self.receive_at_cancel();
+        RX_WINDOW_ENDED.store(false, Ordering::Relaxed);
 
         let scheduled =
             unsafe { raw::nrf_802154_receive_at(start_us, duration_us, channel, RX_WINDOW_ID) };
@@ -711,6 +717,8 @@ impl<'d> Radio<'d> {
     /// Cancel the receive window scheduled by [`receive_at`](Self::receive_at),
     /// if it has not started yet (a started one just runs to its end).
     pub fn receive_at_cancel(&mut self) {
+        RX_WINDOW_ENDED.store(false, Ordering::Relaxed);
+
         if RX_WINDOW_SCHEDULED.swap(false, Ordering::Relaxed) {
             unsafe {
                 raw::nrf_802154_receive_at_cancel(RX_WINDOW_ID);
@@ -737,6 +745,42 @@ impl<'d> Radio<'d> {
         crate::platform::refresh_temperature();
 
         RadioState::wait(|state| state.rx_queue.dequeue_into(buf)).await
+    }
+
+    /// [`wait_frame`](Self::wait_frame), for the frames of a timed receive
+    /// window ([`receive_at`](Self::receive_at)) - which also puts the radio
+    /// to sleep when the window ends.
+    ///
+    /// The driver ends a window in the receive state (`receive_at` is a
+    /// delayed `receive`), and leaves the transition to sleep to its user, as
+    /// Nordic's own OpenThread platform does on the window's timeout. Without
+    /// it the receiver would stay on until the next operation - which for a
+    /// CSL child is the next window, so it would never really sleep.
+    pub async fn wait_window_frame(&mut self, buf: &mut [u8]) -> PsduMeta {
+        crate::platform::refresh_temperature();
+
+        loop {
+            let frame = RadioState::wait(|state| {
+                if let Some(meta) = state.rx_queue.dequeue_into(buf) {
+                    Some(Some(meta))
+                } else {
+                    RX_WINDOW_ENDED
+                        .swap(false, Ordering::Relaxed)
+                        .then_some(None)
+                }
+            })
+            .await;
+
+            match frame {
+                Some(meta) => break meta,
+                // A frame being received or acknowledged right now keeps the
+                // radio busy, and it then returns to the receive state on its
+                // own; that receiver goes off with the next operation.
+                None => {
+                    self.sleep_if_idle();
+                }
+            }
+        }
     }
 
     /// Set the CSL period the driver advertises in the CSL IE of its enhanced
@@ -960,17 +1004,31 @@ impl<'d> Radio<'d> {
         let mut buf = [0; MAX_PSDU_SIZE];
         buf[..data.len()].copy_from_slice(data);
 
-        self.transmit_with(&mut buf[..data.len()], FrameProps::PREPARED, cca, ack_buf)
-            .await
+        let channel = self.channel();
+
+        self.transmit_with(
+            &mut buf[..data.len()],
+            FrameProps::PREPARED,
+            channel,
+            cca,
+            ack_buf,
+        )
+        .await
     }
 
     /// [`transmit`](Self::transmit), with the driver finishing the frame as
-    /// `props` says (see [`FrameProps`]). The frame as it went on the air is
-    /// written back into `data`.
+    /// `props` says (see [`FrameProps`]), on `channel`. The frame as it went on
+    /// the air is written back into `data`.
+    ///
+    /// The channel is the frame's own: the receiver stays on (or returns to)
+    /// the channel set with [`set_channel`](Self::set_channel) - which a frame
+    /// on another channel, e.g. to a CSL peer listening on its CSL channel,
+    /// must not move.
     pub async fn transmit_with(
         &mut self,
         data: &mut [u8],
         props: FrameProps,
+        channel: u8,
         cca: bool,
         mut ack_buf: Option<&mut [u8]>,
     ) -> Result<Option<PsduMeta>, Error> {
@@ -1002,8 +1060,8 @@ impl<'d> Radio<'d> {
                 power: 0,
             },
             tx_channel: raw::nrf_802154_tx_channel_metadata_t {
-                use_metadata_value: false,
-                channel: 0,
+                use_metadata_value: true,
+                channel,
             },
             // Requires NRF_802154_TX_TIMESTAMP_PROVIDER_ENABLED (which we don't
             // enable); leaving it false keeps the pre-nrfx-4 behavior.
@@ -1083,17 +1141,26 @@ impl<'d> Radio<'d> {
         let mut buf = [0; MAX_PSDU_SIZE];
         buf[..data.len()].copy_from_slice(data);
 
-        self.transmit_csma_ca_with(&mut buf[..data.len()], FrameProps::PREPARED, ack_buf)
-            .await
+        let channel = self.channel();
+
+        self.transmit_csma_ca_with(
+            &mut buf[..data.len()],
+            FrameProps::PREPARED,
+            channel,
+            ack_buf,
+        )
+        .await
     }
 
     /// [`transmit_csma_ca`](Self::transmit_csma_ca), with the driver finishing
-    /// the frame as `props` says (see [`FrameProps`]). The frame as it went on
-    /// the air is written back into `data`.
+    /// the frame as `props` says (see [`FrameProps`]), on `channel` (see
+    /// [`transmit_with`](Self::transmit_with)). The frame as it went on the
+    /// air is written back into `data`.
     pub async fn transmit_csma_ca_with(
         &mut self,
         data: &mut [u8],
         props: FrameProps,
+        channel: u8,
         mut ack_buf: Option<&mut [u8]>,
     ) -> Result<Option<PsduMeta>, Error> {
         DBG_TX_ENTER.fetch_add(1, Ordering::Relaxed);
@@ -1123,8 +1190,8 @@ impl<'d> Radio<'d> {
                 power: 0,
             },
             tx_channel: raw::nrf_802154_tx_channel_metadata_t {
-                use_metadata_value: false,
-                channel: 0,
+                use_metadata_value: true,
+                channel,
             },
             // Requires NRF_802154_TX_TIMESTAMP_PROVIDER_ENABLED (which we don't
             // enable); leaving it false keeps the pre-nrfx-4 behavior.
@@ -1175,8 +1242,8 @@ impl<'d> Radio<'d> {
 
     /// [`transmit_with`](Self::transmit_with), at a given time: the frame's
     /// SHR starts at `start_us` (driver clock, see [`now_us`](Self::now_us)),
-    /// on the current channel. With `cca`, a single CCA runs right before it -
-    /// no backoff - and a busy channel fails the transmission.
+    /// on `channel`. With `cca`, a single CCA runs right before it - no
+    /// backoff - and a busy channel fails the transmission.
     ///
     /// This is how a frame is timed into a peer's receive window, e.g. by a
     /// Thread parent transmitting to a CSL child. `start_us` has to be ahead of
@@ -1187,6 +1254,7 @@ impl<'d> Radio<'d> {
         data: &mut [u8],
         props: FrameProps,
         start_us: u64,
+        channel: u8,
         cca: bool,
         mut ack_buf: Option<&mut [u8]>,
     ) -> Result<Option<PsduMeta>, Error> {
@@ -1213,7 +1281,7 @@ impl<'d> Radio<'d> {
                 dynamic_data_is_set: props.dynamic_data_is_set,
             },
             cca,
-            channel: self.channel(),
+            channel,
             tx_power: raw::nrf_802154_tx_power_metadata_t {
                 use_metadata_value: false,
                 power: 0,
@@ -1233,7 +1301,12 @@ impl<'d> Radio<'d> {
         if u32::from(err) != raw::NRF_802154_TX_ERROR_NONE {
             // Returning drops `claim`, which hands the buffer back: the driver
             // never took the frame.
-            debug!("nrf_802154 timed TX at {} refused ({})", start_us, err);
+            debug!(
+                "nrf_802154 timed TX at {} ({} us ahead) refused ({})",
+                start_us,
+                start_us as i64 - self.now_us() as i64,
+                err
+            );
             return Err(Error::ScheduleTransmit);
         }
 
@@ -1800,9 +1873,13 @@ unsafe extern "C" fn nrf_802154_receive_failed(error: raw::nrf_802154_rx_error_t
 
     if id == RX_WINDOW_ID && error == delayed_timeout {
         RX_WINDOW_SCHEDULED.store(false, Ordering::Relaxed);
+        RX_WINDOW_ENDED.store(true, Ordering::Relaxed);
+        STATE_SIGNAL.signal(());
         trace!("nrf_802154 timed receive window ended without a frame");
     } else if id == RX_WINDOW_ID && (error == delayed_denied || error == delayed_aborted) {
         RX_WINDOW_SCHEDULED.store(false, Ordering::Relaxed);
+        RX_WINDOW_ENDED.store(true, Ordering::Relaxed);
+        STATE_SIGNAL.signal(());
         debug!("nrf_802154 timed receive window failed: error {}", error);
     } else {
         // A frame that failed inside a window (or in plain RX): the window
