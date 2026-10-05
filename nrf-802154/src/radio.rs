@@ -1173,6 +1173,86 @@ impl<'d> Radio<'d> {
         Self::wait_transmit_done(&mut ack_buf, data).await
     }
 
+    /// [`transmit_with`](Self::transmit_with), at a given time: the frame's
+    /// SHR starts at `start_us` (driver clock, see [`now_us`](Self::now_us)),
+    /// on the current channel. With `cca`, a single CCA runs right before it -
+    /// no backoff - and a busy channel fails the transmission.
+    ///
+    /// This is how a frame is timed into a peer's receive window, e.g. by a
+    /// Thread parent transmitting to a CSL child. `start_us` has to be ahead of
+    /// the clock by at least the CCA and the radio ramp-up, or the driver
+    /// refuses the frame with [`Error::ScheduleTransmit`].
+    pub async fn transmit_at_with(
+        &mut self,
+        data: &mut [u8],
+        props: FrameProps,
+        start_us: u64,
+        cca: bool,
+        mut ack_buf: Option<&mut [u8]>,
+    ) -> Result<Option<PsduMeta>, Error> {
+        DBG_TX_ENTER.fetch_add(1, Ordering::Relaxed);
+
+        crate::platform::refresh_temperature();
+
+        if data.len() > MAX_PSDU_SIZE {
+            return Err(Error::TransmitDataTooLarge);
+        }
+
+        if let Some(ack_buf) = ack_buf.as_ref() {
+            if ack_buf.len() < MAX_PSDU_SIZE {
+                return Err(Error::ReceiveBufTooSmall);
+            }
+        }
+
+        let (claim, packet_data) = TxClaim::claim(data).await;
+
+        let metadata = raw::nrf_802154_transmit_at_metadata_t {
+            // What is left for the driver to do to the frame: see `FrameProps`.
+            frame_props: raw::nrf_802154_transmitted_frame_props_t {
+                is_secured: props.is_secured,
+                dynamic_data_is_set: props.dynamic_data_is_set,
+            },
+            cca,
+            channel: self.channel(),
+            tx_power: raw::nrf_802154_tx_power_metadata_t {
+                use_metadata_value: false,
+                power: 0,
+            },
+            extra_cca_attempts: 0,
+            // Requires NRF_802154_TX_TIMESTAMP_PROVIDER_ENABLED (which we don't
+            // enable).
+            tx_timestamp_encode: false,
+        };
+
+        // Unlike an immediate transmission, a timed one does not compete with
+        // the operation in progress (the driver schedules it as a timeslot of
+        // its own), so there is nothing to retry: a refusal means the time is
+        // too close or past, or another timed transmission is pending.
+        let err = unsafe { raw::nrf_802154_transmit_raw_at(packet_data, start_us, &metadata) };
+
+        if u32::from(err) != raw::NRF_802154_TX_ERROR_NONE {
+            // Returning drops `claim`, which hands the buffer back: the driver
+            // never took the frame.
+            debug!("nrf_802154 timed TX at {} refused ({})", start_us, err);
+            return Err(Error::ScheduleTransmit);
+        }
+
+        // From here on the frame is the driver's, as in `transmit_with`. A drop
+        // of this future does not cancel it: it still goes out at its time,
+        // and its completion hands the buffer back.
+        claim.into_driver();
+
+        DBG_TX_SCHED.fetch_add(1, Ordering::Relaxed);
+
+        Self::wait_transmit_done(&mut ack_buf, data).await
+    }
+
+    /// Set how many backoffs CSMA-CA ([`transmit_csma_ca`](Self::transmit_csma_ca))
+    /// takes before declaring a busy channel; the driver's default is 4.
+    pub fn set_csma_ca_max_backoffs(&mut self, max_backoffs: u8) {
+        unsafe { raw::nrf_802154_csma_ca_max_backoffs_set(max_backoffs) }
+    }
+
     async fn wait_transmit_done(
         ack_buf: &mut Option<&mut [u8]>,
         data: &mut [u8],

@@ -81,6 +81,9 @@ pub struct OpenThreadRadio<'d> {
     config: openthread::Config,
     power: i8,
     cca_threshold: Option<i8>,
+    /// The CSMA-CA backoff limit last applied to the driver; `None` while it
+    /// is still the driver's default.
+    csma_max_backoffs: Option<u8>,
     /// Whether the receiver is currently commanded by a timed window
     /// (`receive_at`) rather than by `set_receive` / `set_sleep`.
     timed_rx: bool,
@@ -112,6 +115,7 @@ impl<'d> OpenThreadRadio<'d> {
             // The C driver's PIB default: Energy Detection at -75 dBm - which
             // is also OpenThread's own default threshold.
             cca_threshold: Some(-75),
+            csma_max_backoffs: None,
             timed_rx: false,
             csl: openthread::CslConfig::new(),
             csl_accuracy_ppm: Self::DEFAULT_CSL_ACCURACY_PPM,
@@ -189,7 +193,10 @@ impl openthread::Radio for OpenThreadRadio<'_> {
                 // The driver finishes the frames it sends: frame counter and
                 // CSL IE written at transmit time (its security and IE
                 // writers), AES-CCM* with the keys from `set_mac_keys`.
-                .union(openthread::Capabilities::TRANSMIT_SEC),
+                .union(openthread::Capabilities::TRANSMIT_SEC)
+                // Timed transmit (`PsduTxInfo::tx_at_us`), which a Thread FTD
+                // uses to send into the receive windows of its CSL children.
+                .union(openthread::Capabilities::TRANSMIT_TIMING),
             // Full MAC offload: auto-ACK, address filtering, ACK handling
             // and the source-match table (the ACKs' pending bit consults the
             // driver's pending-bit lists, see `set_src_match_config`) are all
@@ -470,20 +477,54 @@ impl openthread::Radio for OpenThreadRadio<'_> {
         };
         let finishes_header = !psdu_tx.header_updated;
 
-        // We advertise `Capabilities::CSMA_BACKOFF`, so OpenThread expects the
-        // radio to perform CSMA-CA channel access itself when it requests it
-        // (a `Some` threshold). Route to the driver's CSMA-CA transmit in
-        // that case - as Energy Detection at the requested dBm threshold -
-        // and transmit immediately without CCA otherwise.
-        let meta = if let Some(threshold) = cca_threshold {
+        // CCA, when requested (a `Some` threshold), is Energy Detection at the
+        // requested dBm threshold.
+        if let Some(threshold) = cca_threshold {
             if self.cca_threshold != Some(threshold) {
                 self.cca_threshold = Some(threshold);
                 self.radio.set_cca(crate::Cca::ed_from_dbm(threshold));
             }
+        }
+
+        let cca = cca_threshold.is_some();
+
+        // A timed frame, if it can still make its time: its SHR starts 5
+        // octets (10 symbols) before the end of the SFD OpenThread times it
+        // by, and the driver wants that comfortably ahead of its clock to fit
+        // the CCA and the ramp-up in. A frame that is too late goes out right
+        // away, as OpenThread's own timing would send it - the window it is
+        // aimed at may still be open.
+        const SHR_US: u64 = 10 * 16;
+        const MIN_LEAD_US: u64 = 400;
+
+        let tx_start_us = psdu_tx
+            .tx_at_us
+            .map(|tx_at_us| tx_at_us.saturating_sub(SHR_US))
+            .filter(|start_us| *start_us >= self.radio.now_us() + MIN_LEAD_US);
+
+        let meta = if let Some(start_us) = tx_start_us {
+            Radio::transmit_at_with(&mut self.radio, data, props, start_us, cca, ack).await?
+        } else if cca
+            && psdu_tx.tx_at_us.is_none()
+            && psdu_tx
+                .max_csma_backoffs
+                .is_none_or(|backoffs| backoffs > 0)
+        {
+            // We advertise `Capabilities::CSMA_BACKOFF`, so OpenThread expects
+            // the radio to perform CSMA-CA channel access itself, with as many
+            // backoffs as it asks for.
+            if let Some(backoffs) = psdu_tx.max_csma_backoffs {
+                if self.csma_max_backoffs != Some(backoffs) {
+                    self.csma_max_backoffs = Some(backoffs);
+                    self.radio.set_csma_ca_max_backoffs(backoffs);
+                }
+            }
 
             Radio::transmit_csma_ca_with(&mut self.radio, data, props, ack).await?
         } else {
-            Radio::transmit_with(&mut self.radio, data, props, false, ack).await?
+            // No CCA, or a single one and no backoff (a late timed frame, or
+            // OpenThread asking for no backoffs).
+            Radio::transmit_with(&mut self.radio, data, props, cca, ack).await?
         };
 
         if finishes_header {
