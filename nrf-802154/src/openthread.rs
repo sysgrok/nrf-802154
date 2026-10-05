@@ -48,6 +48,7 @@ impl PsduMeta {
                 frame_counter: sec.frame_counter,
                 key_id: sec.key_id,
             }),
+            acked_with_frame_pending: Some(self.acked_frame_pending),
         }
     }
 
@@ -132,6 +133,13 @@ impl<'d> OpenThreadRadio<'d> {
     /// oscillator (LFRC, ±250 PPM even when calibrated) set the real figure
     /// with [`with_csl_timing`](Self::with_csl_timing), or the parent's windows
     /// will be too narrow and frames will be missed.
+    ///
+    /// On nRF52/nRF53, a CSL *parent* needs the crystal regardless: the driver
+    /// timestamps received frames with a 16 MHz timer, re-aligned with the LP
+    /// clock only every ~17 s, and the RC oscillator (whose rate moves with
+    /// each recalibration) drifts hundreds of µs away from it in between -
+    /// timing the parent's transmissions to its children off their windows.
+    /// The nRF54L timestamps off the LP clock itself.
     pub const DEFAULT_CSL_ACCURACY_PPM: u8 = 20;
 
     /// The default timed-receive uncertainty reported to a CSL parent, in units
@@ -218,6 +226,7 @@ impl openthread::Radio for OpenThreadRadio<'_> {
             csl_accuracy_ppm: self.csl_accuracy_ppm,
             csl_uncertainty: self.csl_uncertainty,
             bus_speed: 0,
+            bus_latency_us: 0,
         })
     }
 
@@ -486,13 +495,12 @@ impl openthread::Radio for OpenThreadRadio<'_> {
         // What the driver still has to do to the frame before it goes out
         // (`TRANSMIT_SEC`): assign the frame counter and fill the CSL IE unless
         // the header is final already (a retransmission), and secure it unless
-        // it is secured already. The driver does that in place, in its own
-        // buffer, and the finished frame is copied back below.
+        // it is secured already. The driver does that in its own buffer, and
+        // the finished frame is copied back.
         let props = crate::FrameProps {
             is_secured: psdu_tx.security_processed,
             dynamic_data_is_set: psdu_tx.header_updated,
         };
-        let finishes_header = !psdu_tx.header_updated;
 
         // CCA, when requested (a `Some` threshold), is Energy Detection at the
         // requested dBm threshold.
@@ -519,9 +527,8 @@ impl openthread::Radio for OpenThreadRadio<'_> {
             .map(|tx_at_us| tx_at_us.saturating_sub(SHR_US))
             .filter(|start_us| *start_us >= self.radio.now_us() + MIN_LEAD_US);
 
-        let meta = if let Some(start_us) = tx_start_us {
-            Radio::transmit_at_with(&mut self.radio, data, props, start_us, channel, cca, ack)
-                .await?
+        let result = if let Some(start_us) = tx_start_us {
+            Radio::transmit_at_with(&mut self.radio, data, props, start_us, channel, cca, ack).await
         } else if cca
             && psdu_tx.tx_at_us.is_none()
             && psdu_tx
@@ -538,19 +545,23 @@ impl openthread::Radio for OpenThreadRadio<'_> {
                 }
             }
 
-            Radio::transmit_csma_ca_with(&mut self.radio, data, props, channel, ack).await?
+            Radio::transmit_csma_ca_with(&mut self.radio, data, props, channel, ack).await
         } else {
             // No CCA, or a single one and no backoff (a late timed frame, or
             // OpenThread asking for no backoffs).
-            Radio::transmit_with(&mut self.radio, data, props, channel, cca, ack).await?
+            Radio::transmit_with(&mut self.radio, data, props, channel, cca, ack).await
         };
 
-        // The driver hands back the frame as it went on the air - with its
-        // header finished, and secured.
-        if finishes_header {
-            psdu_tx.header_updated = true;
+        // The driver hands back the frame as it finished it - frame counter,
+        // key index and CSL IE set, secured - whether it got through or not:
+        // OpenThread repeats the frame counter of an unacknowledged frame to a
+        // sleepy child when it retransmits it, so a failure must report it too.
+        if let Some(done) = self.radio.last_tx_frame_props() {
+            psdu_tx.header_updated |= done.dynamic_data_is_set;
+            psdu_tx.security_processed |= done.is_secured;
         }
-        psdu_tx.security_processed = true;
+
+        let meta = result?;
 
         Ok(if let Some(meta) = meta {
             if let Some(ack_psdu_buf) = ack_psdu_buf {
@@ -580,7 +591,10 @@ impl openthread::Radio for OpenThreadRadio<'_> {
             // when the window ends.
             Radio::wait_window_frame(&mut self.radio, &mut psdu_buf[..len - 2]).await
         } else {
-            Radio::receive(&mut self.radio, &mut psdu_buf[..len - 2]).await?
+            // `set_receive` switched the receiver on; from there the driver
+            // keeps it on (rx-on-when-idle), or lets it sleep once idle - which
+            // switching it back on here, on every frame, would defeat.
+            Radio::wait_frame(&mut self.radio, &mut psdu_buf[..len - 2]).await
         };
 
         meta.write_crc(psdu_buf);

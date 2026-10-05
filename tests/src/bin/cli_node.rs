@@ -114,6 +114,22 @@ static HEAP: Heap = Heap::empty();
 async fn main(spawner: Spawner) {
     let p = nrf_802154_tests::init();
 
+    // The LP clock. On the nRF52840 it has to be the 32.768 kHz crystal: there
+    // the driver timestamps frames with a 16 MHz timer that it re-aligns with
+    // the LP clock only every ~17 s, and against the RC oscillator - which MPSL
+    // recalibrates every few seconds, changing its rate in steps - the two
+    // drift apart by hundreds of µs in between: enough for a CSL parent to miss
+    // its children's receive windows. The nRF54L timestamps off the LP clock
+    // (GRTC) itself, so the RC oscillator does there.
+    #[cfg(feature = "nrf52840")]
+    let lfclk_cfg = mpsl_clock_lfclk_cfg_t {
+        source: nrf_mpsl::raw::MPSL_CLOCK_LF_SRC_XTAL as u8,
+        rc_ctiv: 0,
+        rc_temp_ctiv: 0,
+        accuracy_ppm: 20,
+        skip_wait_lfclk_started: nrf_mpsl::raw::MPSL_DEFAULT_SKIP_WAIT_LFCLK_STARTED != 0,
+    };
+    #[cfg(not(feature = "nrf52840"))]
     let lfclk_cfg = mpsl_clock_lfclk_cfg_t {
         source: nrf_mpsl::raw::MPSL_CLOCK_LF_SRC_RC as u8,
         rc_ctiv: nrf_mpsl::raw::MPSL_RECOMMENDED_RC_CTIV as u8,
@@ -121,6 +137,7 @@ async fn main(spawner: Spawner) {
         accuracy_ppm: nrf_mpsl::raw::MPSL_DEFAULT_CLOCK_ACCURACY_PPM as u16,
         skip_wait_lfclk_started: nrf_mpsl::raw::MPSL_DEFAULT_SKIP_WAIT_LFCLK_STARTED != 0,
     };
+    let lfclk_accuracy_ppm = lfclk_cfg.accuracy_ppm;
 
     let mpsl_p = nrf_802154_tests::mpsl_peripherals!(p);
     // `with_timeslots` rather than `new`: the flash driver schedules its
@@ -166,12 +183,21 @@ async fn main(spawner: Spawner) {
 
     // The full-MAC radio goes straight to the stack: no software MAC, no
     // executor split.
+    //
+    // The CSL clock accuracy reported to peers is the LP clock's (see
+    // `lfclk_cfg`), not the crystal the radio defaults to: with the RC
+    // oscillator a CSL peer would otherwise size its windows for a fraction of
+    // the drift it gets.
     let radio = OpenThreadRadio::new(Radio::new(
         p.RADIO,
         nrf_802154_tests::radio_peripherals!(p),
         Irqs,
         mpsl,
-    ));
+    ))
+    .with_csl_timing(
+        lfclk_accuracy_ppm.min(u8::MAX as u16) as u8,
+        OpenThreadRadio::DEFAULT_CSL_UNCERTAINTY,
+    );
     spawner.spawn(run_ot(ot.clone(), radio).unwrap());
 
     #[cfg(feature = "console-usb")]
@@ -255,7 +281,9 @@ async fn run_cli(ot: OpenThread<'static>, mut console_rx: ConsoleRx) -> ! {
                         console::drained().await;
                         cortex_m::peripheral::SCB::sys_reset()
                     }
-                    "" => (),
+                    // An empty line included: the CLI answers it with a bare
+                    // prompt, which is how the harness (and `serial_bridge`)
+                    // probe whether the node is up.
                     _ => {
                         let _ = ot.cli_input_line(line);
                     }

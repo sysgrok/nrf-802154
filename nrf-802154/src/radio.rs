@@ -163,6 +163,9 @@ pub struct PsduMeta {
     /// The security material of the *secured enhanced ACK* the driver sent for
     /// this frame, if it sent one (see [`AckSecurity`]).
     pub ack_security: Option<AckSecurity>,
+    /// Whether the driver acknowledged this frame with the Frame Pending bit
+    /// set (as the pending-bit configuration decided for its source).
+    pub acked_frame_pending: bool,
 }
 
 impl PsduMeta {
@@ -206,6 +209,15 @@ impl FrameProps {
         is_secured: true,
         dynamic_data_is_set: true,
     };
+}
+
+impl From<raw::nrf_802154_transmitted_frame_props_t> for FrameProps {
+    fn from(props: raw::nrf_802154_transmitted_frame_props_t) -> Self {
+        Self {
+            is_secured: props.is_secured,
+            dynamic_data_is_set: props.dynamic_data_is_set,
+        }
+    }
 }
 
 /// The security material the driver used for a secured enhanced ACK it sent
@@ -255,6 +267,14 @@ static RX_WINDOW_ENDED: AtomicBool = AtomicBool::new(false);
 const RX_WINDOW_ID: u32 = 1;
 static ACK_SEC_FRAME_COUNTER: AtomicU32 = AtomicU32::new(0);
 static ACK_SEC_KEY_ID: AtomicU8 = AtomicU8::new(0);
+/// Whether the ACK the driver is currently sending has Frame Pending set,
+/// handed over to the received frame like `ACK_SEC_PENDING`.
+static ACK_FRAME_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Take whether the ACK just sent had Frame Pending set.
+fn take_ack_frame_pending() -> bool {
+    ACK_FRAME_PENDING.swap(false, Ordering::AcqRel)
+}
 
 /// Take the security material of the enhanced ACK just sent, if any.
 fn take_ack_security() -> Option<AckSecurity> {
@@ -1320,6 +1340,17 @@ impl<'d> Radio<'d> {
         Self::wait_transmit_done(&mut ack_buf, data).await
     }
 
+    /// What the driver did to the frame of the last transmission it took: set
+    /// its frame counter, key index and CSL IE (`dynamic_data_is_set`), secured
+    /// it (`is_secured`). Reported whether or not the frame got through - one
+    /// that went unacknowledged was still finished, and its retransmission has
+    /// to repeat its frame counter - and the transmit call hands the finished
+    /// frame back in its buffer either way. `None` if the driver never took the
+    /// frame (a refused timed transmission, say).
+    pub fn last_tx_frame_props(&self) -> Option<FrameProps> {
+        STATE.lock(|state| state.borrow().tx_props)
+    }
+
     /// Set how many backoffs CSMA-CA ([`transmit_csma_ca`](Self::transmit_csma_ca))
     /// takes before declaring a busy channel; the driver's default is 4.
     pub fn set_csma_ca_max_backoffs(&mut self, max_backoffs: u8) {
@@ -1428,6 +1459,7 @@ impl TxClaim {
             // result, so this transmission does not pick up that outcome.
             state.status = RadioStatus::Idle;
             state.tx_result = None;
+            state.tx_props = None;
 
             TX_BUSY.store(true, Ordering::Release);
 
@@ -1612,6 +1644,7 @@ impl RxFrame {
             lqi: None,
             time: None,
             ack_security: None,
+            acked_frame_pending: false,
         },
         data: [0; MAX_PACKET_SIZE],
     };
@@ -1699,6 +1732,9 @@ struct RadioState {
     /// Separate buffer for TX ACK data, so `nrf_802154_received_raw` cannot
     /// overwrite ACK data before `wait_transmit_done` reads it.
     ack_rx: [u8; MAX_PACKET_SIZE],
+    /// What the driver did to the frame of the last transmission it reported
+    /// back on (see [`Radio::last_tx_frame_props`]).
+    tx_props: Option<FrameProps>,
 }
 
 impl RadioState {
@@ -1709,6 +1745,7 @@ impl RadioState {
             tx: [0; MAX_PACKET_SIZE],
             rx_queue: RxQueue::new(),
             ack_rx: [0; MAX_PACKET_SIZE],
+            tx_props: None,
         }
     }
 
@@ -1783,6 +1820,13 @@ unsafe extern "C" fn nrf_802154_tx_ack_started(p_data: *const u8) {
     let phr = unsafe { *p_data };
     let frame = unsafe { core::slice::from_raw_parts(p_data, phr as usize + 1) };
 
+    const FCF_FRAME_PENDING: u8 = 1 << 4;
+
+    ACK_FRAME_PENDING.store(
+        frame.get(1).is_some_and(|fcf| fcf & FCF_FRAME_PENDING != 0),
+        Ordering::Release,
+    );
+
     match parse_ack_security(frame) {
         Some(sec) => {
             ACK_SEC_FRAME_COUNTER.store(sec.frame_counter, Ordering::Relaxed);
@@ -1793,34 +1837,10 @@ unsafe extern "C" fn nrf_802154_tx_ack_started(p_data: *const u8) {
     }
 }
 
-#[no_mangle]
-unsafe extern "C" fn nrf_802154_received_raw(p_data: *mut u8, power: i8, lqi: u8) {
-    RadioState::update(|state| {
-        let phr = unsafe { *p_data };
-        let total = phr as usize + 1;
-
-        if phr >= MIN_PHR && total <= MAX_PACKET_SIZE {
-            if let Some(frame) = state.rx_queue.enqueue_slot() {
-                frame.data[..total]
-                    .copy_from_slice(unsafe { core::slice::from_raw_parts(p_data, total) });
-                frame.meta = PsduMeta {
-                    len: phr - 2, // PHR value - FCS
-                    crc: u16::from_le_bytes([frame.data[total - 2], frame.data[total - 1]]),
-                    power,
-                    lqi: Some(lqi),
-                    time: None,
-                    ack_security: take_ack_security(),
-                };
-            }
-            // else: queue full — drop the frame (counted in `rx_queue.dropped`).
-        }
-        // else: invalid PHR/length — drop silently.
-
-        unsafe {
-            raw::nrf_802154_buffer_free_raw(p_data);
-        }
-    });
-}
+// `nrf_802154_received_raw` is left to the driver's own (weak) definition: it
+// reads the frame's timestamp and hands both to `nrf_802154_received_timestamp_raw`
+// below. A CSL parent times its transmissions to a child by the timestamps of
+// the child's frames, so a frame without one is of no use to it.
 
 #[no_mangle]
 unsafe extern "C" fn nrf_802154_received_timestamp_raw(
@@ -1842,8 +1862,9 @@ unsafe extern "C" fn nrf_802154_received_timestamp_raw(
                     crc: u16::from_le_bytes([frame.data[total - 2], frame.data[total - 1]]),
                     power,
                     lqi: Some(lqi),
-                    time: Some(time),
+                    time: (time != raw::NRF_802154_NO_TIMESTAMP as u64).then_some(time),
                     ack_security: take_ack_security(),
+                    acked_frame_pending: take_ack_frame_pending(),
                 };
             }
             // else: queue full — drop the frame (counted in `rx_queue.dropped`).
@@ -1904,6 +1925,8 @@ unsafe extern "C" fn nrf_802154_transmitted_raw(
 
     RadioState::update(|state| {
         let p_metadata = unsafe { p_metadata.as_ref().unwrap() };
+        state.tx_props = Some(FrameProps::from(p_metadata.frame_props));
+
         if !p_metadata.data.transmitted.p_ack.is_null() {
             // `length` is the ACK's PSDU length (the PHR value, FCS included),
             // like a received frame's PHR; the buffer carries the PHR byte in
@@ -1923,9 +1946,11 @@ unsafe extern "C" fn nrf_802154_transmitted_raw(
                     crc: u16::from_le_bytes([state.ack_rx[total - 2], state.ack_rx[total - 1]]),
                     power: p_metadata.data.transmitted.power,
                     lqi: Some(p_metadata.data.transmitted.lqi),
-                    time: Some(p_metadata.data.transmitted.time),
+                    time: (p_metadata.data.transmitted.time != raw::NRF_802154_NO_TIMESTAMP as u64)
+                        .then_some(p_metadata.data.transmitted.time),
                     // An ACK we received, not one we sent.
                     ack_security: None,
+                    acked_frame_pending: false,
                 })));
             } else {
                 state.tx_result = Some(TxResult::Done(None));
@@ -1944,12 +1969,14 @@ unsafe extern "C" fn nrf_802154_transmitted_raw(
 unsafe extern "C" fn nrf_802154_transmit_failed(
     _p_frame: *mut u8,
     error: raw::nrf_802154_tx_error_t,
-    _p_metadata: *const raw::nrf_802154_transmit_done_metadata_t,
+    p_metadata: *const raw::nrf_802154_transmit_done_metadata_t,
 ) {
     // Release the shared TX buffer — see the note in `transmitted_raw`.
     TX_BUSY.store(false, Ordering::Release);
 
     RadioState::update(|state| {
+        state.tx_props =
+            unsafe { p_metadata.as_ref() }.map(|metadata| FrameProps::from(metadata.frame_props));
         state.tx_result = Some(TxResult::Failed(error));
     });
 }
