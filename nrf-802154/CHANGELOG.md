@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+* Fix (nRF52/nRF53): an LP timer event the driver scheduled could silently never fire - the RTC compare was armed for the counter's next tick, which the RTC does not reliably match - leaving whatever the driver timed by it (a CSMA-CA backoff, say) waiting for good
 * Breaking: CSL (Thread 1.2 Synchronized Sleepy End Device) support in `OpenThreadRadio`
 * Breaking: `Radio`: everything necessary for Thread CSL support - scheduled receival and enhanced ACKs
 * `Radio::sleep` / `enter_receive` no longer cancel a scheduled receive window; `receive_at_cancel` does

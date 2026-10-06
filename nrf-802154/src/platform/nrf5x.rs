@@ -299,6 +299,33 @@ fn lp_current_lpticks() -> u64 {
     }
 }
 
+/// Arm RTC compare channel `cc` to fire at `fire_lpticks`, or as soon as it
+/// reliably can if that is (nearly) past, and return the lptick it is armed
+/// for.
+///
+/// The RTC does not reliably match a CC written with the COUNTER's current or
+/// next value, so the target is kept at least two ticks out - checked again
+/// after the write too, as the COUNTER may tick in between. A compare that
+/// silently never fires leaves whatever the SL timed by it waiting for good.
+fn rtc_compare_arm(cc: usize, fire_lpticks: u64) -> u64 {
+    let rtc = lp_timer();
+
+    // Cleared before writing CC: a match right after the write must not be
+    // erased.
+    rtc.events_compare(cc).write_value(0);
+
+    loop {
+        let target = fire_lpticks.max(lp_current_lpticks() + 2);
+
+        rtc.cc(cc)
+            .write(|w| w.set_compare((target & RTC_COUNTER_MAX as u64) as u32));
+
+        if lp_current_lpticks() + 1 < target {
+            break target;
+        }
+    }
+}
+
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lp_timer_init() {
     let rtc = lp_timer();
@@ -385,26 +412,14 @@ extern "C" fn nrf_802154_platform_sl_lptimer_lpticks_to_us_convert(lpticks: u64)
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_schedule_at(fire_lpticks: u64) {
     critical_section::with(|cs| LP_FIRE_LPTICKS.borrow(cs).set(fire_lpticks));
-    let rtc = lp_timer();
 
     // Per the C header contract: "If fire_lpticks are in the past, the lptimer
     // event will be triggered asap, but still from the context of an lptimer's ISR."
     // The ISR dispatches only when EVENTS_COMPARE[0] is set by hardware, so a plain
-    // NVIC pend wouldn't work. Instead, program CC[0] to an imminent value so the
-    // hardware compare fires within ~2 ticks, setting the event flag and triggering
-    // the ISR which then checks `now >= fire`.
-    let cc_val = if fire_lpticks <= lp_current_lpticks() {
-        let now_cc = rtc.counter().read().counter();
-        now_cc.wrapping_add(2) & RTC_COUNTER_MAX
-    } else {
-        (fire_lpticks & RTC_COUNTER_MAX as u64) as u32
-    };
-    // Clear the event before writing CC[0] to avoid losing an immediate match:
-    // if the counter hits the new CC value right after writing, clearing after
-    // would erase the just-set event.
-    rtc.events_compare(0).write_value(0);
-    rtc.cc(0).write(|w| w.set_compare(cc_val));
-    rtc.intenset().write(|w| w.set_compare(0, true));
+    // NVIC pend wouldn't work: the compare is armed for the nearest tick it
+    // reliably fires on, and the ISR then checks `now >= fire`.
+    rtc_compare_arm(0, fire_lpticks);
+    lp_timer().intenset().write(|w| w.set_compare(0, true));
 }
 
 #[no_mangle]
@@ -525,28 +540,22 @@ extern "C" fn nrf_802154_platform_sl_lptimer_hw_task_update_ppi(ppi_channel: u32
 
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_sync_schedule_now() {
+    // The tick the sync fires on is reported back (`sync_lpticks_get`), so it
+    // has to be exactly the one armed.
     let rtc = lp_timer();
-    let now = rtc.counter().read().counter();
-    // Schedule compare[1] to fire at the next tick
-    let cc_val = now.wrapping_add(2) & RTC_COUNTER_MAX;
-    // Clear event before writing CC[1] to avoid losing an immediate match.
-    rtc.events_compare(1).write_value(0);
-    rtc.cc(1).write(|w| w.set_compare(cc_val));
-    rtc.intenset().write(|w| w.set_compare(1, true));
     rtc.evtenset().write(|w| w.set_compare(1, true));
-    critical_section::with(|cs| LP_SYNC_LPTICKS.borrow(cs).set(lp_current_lpticks() + 2));
+    let armed = rtc_compare_arm(1, 0);
+    critical_section::with(|cs| LP_SYNC_LPTICKS.borrow(cs).set(armed));
+    rtc.intenset().write(|w| w.set_compare(1, true));
 }
 
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_sync_schedule_at(fire_lpticks: u64) {
-    critical_section::with(|cs| LP_SYNC_LPTICKS.borrow(cs).set(fire_lpticks));
     let rtc = lp_timer();
-    let cc_val = (fire_lpticks & RTC_COUNTER_MAX as u64) as u32;
-    // Clear event before writing CC[1] to avoid losing an immediate match.
-    rtc.events_compare(1).write_value(0);
-    rtc.cc(1).write(|w| w.set_compare(cc_val));
-    rtc.intenset().write(|w| w.set_compare(1, true));
     rtc.evtenset().write(|w| w.set_compare(1, true));
+    let armed = rtc_compare_arm(1, fire_lpticks);
+    critical_section::with(|cs| LP_SYNC_LPTICKS.borrow(cs).set(armed));
+    rtc.intenset().write(|w| w.set_compare(1, true));
 }
 
 #[no_mangle]
