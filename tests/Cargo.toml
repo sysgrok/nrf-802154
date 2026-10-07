@@ -54,6 +54,7 @@ nrf-mpsl = { workspace = true, default-features = false, features = ["critical-s
 openthread = { workspace = true, default-features = false, features = [
     "defmt",
     "ftd",
+    "csl-receiver",
     "cli",
     "mac-filter",
     "ping-sender",

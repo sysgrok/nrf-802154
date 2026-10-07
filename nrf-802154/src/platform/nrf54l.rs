@@ -133,11 +133,12 @@ const PPIB_CH_TIMESTAMP: usize = 1;
 /// PPIB21 -> PPIB11 channel: peripheral domain to radio domain (hw tasks).
 const PPIB_CH_HW_TASK: usize = 2;
 
-/// NRF_802154_SL_LPTIMER_PLATFORM_NO_RESOURCES
-const LPTIMER_NO_RESOURCES: u32 = 3;
-
 /// NRF_802154_SL_HW_TASK_PPI_INVALID
 const HW_TASK_PPI_INVALID: u32 = u32::MAX;
+
+/// When the armed hw task fires, in lpticks (see `hw_task_update_ppi`).
+static HW_TASK_FIRE_LPTICKS: critical_section::Mutex<core::cell::Cell<u64>> =
+    critical_section::Mutex::new(core::cell::Cell::new(u64::MAX));
 
 // =============================================================================
 // GRTC helpers
@@ -366,14 +367,13 @@ extern "C" fn nrf_802154_platform_sl_lptimer_hw_task_prepare(
     fire_lpticks: u64,
     ppi_channel: u32,
 ) -> u32 {
-    if ppi_channel == HW_TASK_PPI_INVALID {
-        return LPTIMER_NO_RESOURCES;
-    }
-
     // GRTC COMPARE -> DPPIC20 -> PPIB21 -> PPIB11 -> the radio domain's DPPIC10
-    // channel that the SL has hooked the radio task up to.
-    hw_task_route(ppi_channel);
+    // channel that the SL has hooked the radio task up to. The SL may not know
+    // that channel yet (`HW_TASK_PPI_INVALID`): it arms the timer early and
+    // hands the channel over with `hw_task_update_ppi` once the radio is its.
+    hw_task_route((ppi_channel != HW_TASK_PPI_INVALID).then_some(ppi_channel));
     grtc_compare_arm(GRTC_CC_HW_TASK, fire_lpticks);
+    critical_section::with(|cs| HW_TASK_FIRE_LPTICKS.borrow(cs).set(fire_lpticks));
     LP_HW_TASK_ACTIVE.store(1, Ordering::Release);
 
     if grtc_syscounter() >= fire_lpticks {
@@ -395,18 +395,21 @@ extern "C" fn nrf_802154_platform_sl_lptimer_hw_task_cleanup() -> u32 {
 
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_hw_task_update_ppi(ppi_channel: u32) -> u32 {
-    if LP_HW_TASK_ACTIVE.load(Ordering::Acquire) == 0 {
+    if LP_HW_TASK_ACTIVE.load(Ordering::Acquire) == 0 || ppi_channel == HW_TASK_PPI_INVALID {
         return LPTIMER_WRONG_STATE;
     }
-    if ppi_channel == HW_TASK_PPI_INVALID {
-        return LPTIMER_NO_RESOURCES;
-    }
-    // Only the radio-domain end of the bridge names the channel, so retargeting
-    // is a single register write and the armed compare stays untouched.
+    // Only the radio-domain end of the bridge names the channel, so connecting
+    // it is a single register write and the armed compare stays untouched.
     pac::PPIB11.publish_receive(PPIB_CH_HW_TASK).write(|w| {
         w.set_chidx(ppi_channel as u8);
         w.set_en(true);
     });
+    // Connected, but possibly after the compare already fired.
+    if pac::GRTC.events_compare(GRTC_CC_HW_TASK).read() != 0
+        || grtc_syscounter() >= critical_section::with(|cs| HW_TASK_FIRE_LPTICKS.borrow(cs).get())
+    {
+        return LPTIMER_TOO_LATE;
+    }
     LPTIMER_SUCCESS
 }
 
@@ -416,8 +419,9 @@ extern "C" fn nrf_802154_platform_sl_lptimer_granularity_get() -> u32 {
     1
 }
 
-/// Wire the GRTC hw-task compare event through to `ppi_channel` on DPPIC10.
-fn hw_task_route(ppi_channel: u32) {
+/// Wire the GRTC hw-task compare event through to `ppi_channel` on DPPIC10, or
+/// up to the radio-domain end of the bridge if the channel is not known yet.
+fn hw_task_route(ppi_channel: Option<u32>) {
     pac::GRTC.publish_compare(GRTC_CC_HW_TASK).write(|w| {
         w.set_chidx(DPPIC20_CH_HW_TASK);
         w.set_en(true);
@@ -427,8 +431,10 @@ fn hw_task_route(ppi_channel: u32) {
         w.set_en(true);
     });
     pac::PPIB11.publish_receive(PPIB_CH_HW_TASK).write(|w| {
-        w.set_chidx(ppi_channel as u8);
-        w.set_en(true);
+        if let Some(ppi_channel) = ppi_channel {
+            w.set_chidx(ppi_channel as u8);
+            w.set_en(true);
+        }
     });
     pac::DPPIC20
         .chenset()
