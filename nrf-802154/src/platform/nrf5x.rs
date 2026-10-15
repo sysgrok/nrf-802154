@@ -381,31 +381,70 @@ extern "C" fn nrf_802154_platform_sl_lptimer_current_lpticks_get() -> u64 {
 
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_us_to_lpticks_convert(us: u64, round_up: bool) -> u64 {
-    // lpticks = us * 32768 / 1000000
-    // Use u128 intermediate to avoid overflow for large us values.
-    let product = (us as u128) * (RTC_FREQ_HZ as u128);
-    let ticks = if round_up {
-        product.div_ceil(1_000_000u128)
-    } else {
-        product / 1_000_000u128
-    };
-    if ticks > u64::MAX as u128 {
-        u64::MAX
-    } else {
-        ticks as u64
-    }
+    us_to_lpticks(us, round_up)
 }
 
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_lpticks_to_us_convert(lpticks: u64) -> u64 {
-    // us = lpticks * 1000000 / 32768
-    // Use u128 intermediate to avoid overflow for large lptick values.
-    let product = (lpticks as u128) * 1_000_000u128;
-    let us = product / (RTC_FREQ_HZ as u128);
-    if us > u64::MAX as u128 {
-        u64::MAX
+    lpticks_to_us(lpticks)
+}
+
+// 32768 / 1_000_000 reduces to 512 / 15625. The two conversions below are exact for the whole
+// `u64` range without 128-bit arithmetic, which the driver calls far too often to afford: on a
+// 32-bit core a `u128` division is a long software routine.
+
+/// `us * 32768 / 1_000_000`, rounded down or up.
+const fn us_to_lpticks(us: u64, round_up: bool) -> u64 {
+    // us = q * 15625 + r  =>  us * 512 / 15625 = q * 512 + r * 512 / 15625, where
+    // `q * 512` cannot overflow and `r * 512` fits 32 bits
+    let (q, r) = div_rem_u64_by_u16(us, US_PER_LPTICK_DEN);
+
+    let r_scaled = r * LPTICKS_PER_US_NUM;
+    let frac = if round_up {
+        r_scaled.div_ceil(US_PER_LPTICK_DEN)
     } else {
-        us as u64
+        r_scaled / US_PER_LPTICK_DEN
+    };
+
+    q * LPTICKS_PER_US_NUM as u64 + frac as u64
+}
+
+/// `lpticks * 1_000_000 / 32768`, rounded down.
+const fn lpticks_to_us(lpticks: u64) -> u64 {
+    // lpticks = h * 512 + l  =>  lpticks * 15625 / 512 = h * 15625 + l * 15625 / 512
+    let h = lpticks / LPTICKS_PER_US_NUM as u64;
+    let l = lpticks % LPTICKS_PER_US_NUM as u64;
+
+    h * US_PER_LPTICK_DEN as u64 + l * US_PER_LPTICK_DEN as u64 / LPTICKS_PER_US_NUM as u64
+}
+
+/// `RTC_FREQ_HZ / gcd(RTC_FREQ_HZ, 1_000_000)`
+const LPTICKS_PER_US_NUM: u32 = 512;
+/// `1_000_000 / gcd(RTC_FREQ_HZ, 1_000_000)`
+const US_PER_LPTICK_DEN: u32 = 15625;
+
+const _: () =
+    core::assert!(RTC_FREQ_HZ * US_PER_LPTICK_DEN as u64 == 1_000_000 * LPTICKS_PER_US_NUM as u64);
+
+/// Divide a `u64` by a divisor below 2^16 using only 32-bit divisions (a single instruction
+/// on Cortex-M), one 16-bit digit of the dividend at a time.
+const fn div_rem_u64_by_u16(n: u64, d: u32) -> (u64, u32) {
+    let mut q = 0u64;
+    let mut rem = 0u32;
+    let mut shift = 48;
+
+    loop {
+        // `rem < d < 2^16`, so this fits 32 bits
+        let cur = (rem << 16) | ((n >> shift) as u32 & 0xffff);
+
+        q = (q << 16) | (cur / d) as u64;
+        rem = cur % d;
+
+        if shift == 0 {
+            break (q, rem);
+        }
+
+        shift -= 16;
     }
 }
 

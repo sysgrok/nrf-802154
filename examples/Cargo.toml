@@ -66,6 +66,18 @@ name = "reinit"
 path = "src/bin/reinit.rs"
 
 [[bin]]
+name = "rx_at_lead"
+path = "src/bin/rx_at_lead.rs"
+
+[[bin]]
+name = "floor_probe"
+path = "src/bin/floor_probe.rs"
+
+[[bin]]
+name = "sleep_baseline"
+path = "src/bin/sleep_baseline.rs"
+
+[[bin]]
 name = "basic_udp"
 path = "src/bin/basic_udp.rs"
 harness = false
