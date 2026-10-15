@@ -97,10 +97,23 @@ extern "C" fn nrf_802154_hp_timer_init() {
     timer.prescaler().write(|w| w.set_prescaler(4));
 }
 
+/// Stop the HP timer.
+///
+/// On the nRF52, a timer that has run and is stopped with `STOP` alone keeps drawing current -
+/// some 13 uA, for as long as it stays stopped (anomaly 78) - so it is shut down instead, as
+/// Nordic's driver does with its own timer. `start` clears it either way.
+fn hp_timer_halt(timer: pac::timer::Timer) {
+    #[cfg(feature = "nrf52")]
+    timer.tasks_shutdown().write_value(1);
+
+    #[cfg(feature = "nrf53")]
+    timer.tasks_stop().write_value(1);
+}
+
 #[no_mangle]
 extern "C" fn nrf_802154_hp_timer_deinit() {
     let timer = hp_timer();
-    timer.tasks_stop().write_value(1);
+    hp_timer_halt(timer);
     timer.intenclr().write(|w| {
         for i in 0..6 {
             w.set_compare(i, true);
@@ -117,8 +130,7 @@ extern "C" fn nrf_802154_hp_timer_start() {
 
 #[no_mangle]
 extern "C" fn nrf_802154_hp_timer_stop() {
-    let timer = hp_timer();
-    timer.tasks_stop().write_value(1);
+    hp_timer_halt(hp_timer());
 }
 
 #[no_mangle]

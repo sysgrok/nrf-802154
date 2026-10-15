@@ -69,13 +69,22 @@ path = "src/bin/reinit.rs"
 name = "rx_at_lead"
 path = "src/bin/rx_at_lead.rs"
 
+# The sleep-current diagnostics put the Seeed XIAO nRF52840's onboard QSPI flash into deep
+# power-down, through that board's pins.
+[[bin]]
+name = "floor_phases"
+path = "src/bin/floor_phases.rs"
+required-features = ["nrf52840"]
+
 [[bin]]
 name = "floor_probe"
 path = "src/bin/floor_probe.rs"
+required-features = ["nrf52840"]
 
 [[bin]]
 name = "sleep_baseline"
 path = "src/bin/sleep_baseline.rs"
+required-features = ["nrf52840"]
 
 [[bin]]
 name = "basic_udp"
