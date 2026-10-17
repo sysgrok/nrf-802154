@@ -56,7 +56,7 @@ use nrf_802154_tests::{console, ieee_eui64, settings, Irqs, Rng};
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
 use nrf_mpsl::{Flash, MultiprotocolServiceLayer, SessionMem};
 
-use openthread::{OpenThread, OtResources};
+use openthread::{OpenThread, OtResources, Radio as _};
 
 use static_cell::StaticCell;
 
@@ -178,9 +178,6 @@ async fn main(spawner: Spawner) {
 
     let ieee_eui64 = ieee_eui64();
 
-    let ot_resources = mk_static!(OtResources, OtResources::new());
-    let ot = OpenThread::new(ieee_eui64, rng, ot_settings, ot_resources).unwrap();
-
     // The full-MAC radio goes straight to the stack: no software MAC, no
     // executor split.
     //
@@ -188,7 +185,7 @@ async fn main(spawner: Spawner) {
     // `lfclk_cfg`), not the crystal the radio defaults to: with the RC
     // oscillator a CSL peer would otherwise size its windows for a fraction of
     // the drift it gets.
-    let radio = OpenThreadRadio::new(Radio::new(
+    let mut radio = OpenThreadRadio::new(Radio::new(
         p.RADIO,
         nrf_802154_tests::radio_peripherals!(p),
         Irqs,
@@ -198,6 +195,11 @@ async fn main(spawner: Spawner) {
         lfclk_accuracy_ppm.min(u8::MAX as u16) as u8,
         OpenThreadRadio::DEFAULT_CSL_UNCERTAINTY,
     );
+    let radio_caps = radio.init().await.unwrap();
+
+    let ot_resources = mk_static!(OtResources, OtResources::new());
+    let ot = OpenThread::new(ieee_eui64, &radio_caps, rng, ot_settings, ot_resources).unwrap();
+
     spawner.spawn(run_ot(ot.clone(), radio).unwrap());
 
     #[cfg(feature = "console-usb")]

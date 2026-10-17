@@ -794,8 +794,9 @@ impl<'d> Radio<'d> {
             match frame {
                 Some(meta) => break meta,
                 // A frame being received or acknowledged right now keeps the
-                // radio busy, and it then returns to the receive state on its
-                // own; that receiver goes off with the next operation.
+                // radio busy: delivered, it is the caller's to sleep after;
+                // failed, it ends the window once more
+                // (`nrf_802154_receive_failed`).
                 None => {
                     self.sleep_if_idle();
                 }
@@ -1903,9 +1904,18 @@ unsafe extern "C" fn nrf_802154_receive_failed(error: raw::nrf_802154_rx_error_t
         STATE_SIGNAL.signal(());
         debug!("nrf_802154 timed receive window failed: error {}", error);
     } else {
-        // A frame that failed inside a window (or in plain RX): the window
-        // itself goes on.
         trace!("nrf_802154 receive failed: error {}", error);
+
+        // A frame that failed inside a window (or in plain RX): the window
+        // itself goes on - unless it ran out while that frame was being
+        // received. A failed reception is no idle period start for the driver,
+        // so it then stays in receive with nothing left to end it before the
+        // next operation (for a CSL child the next window, a whole period
+        // later): end the window as its timeout would have.
+        if !RX_WINDOW_SCHEDULED.load(Ordering::Relaxed) {
+            RX_WINDOW_ENDED.store(true, Ordering::Relaxed);
+            STATE_SIGNAL.signal(());
+        }
     }
 }
 

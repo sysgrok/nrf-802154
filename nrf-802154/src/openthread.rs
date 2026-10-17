@@ -596,7 +596,8 @@ impl openthread::Radio for OpenThreadRadio<'_> {
         }
 
         let len = psdu_buf.len();
-        let meta = if self.timed_rx {
+        let window = self.timed_rx;
+        let meta = if window {
             // Inside a timed window (`set_receive_at`): just wait for the window's
             // frames, the receiver is the driver's to run - and to put to sleep
             // when the window ends.
@@ -610,11 +611,22 @@ impl openthread::Radio for OpenThreadRadio<'_> {
 
         meta.write_crc(psdu_buf);
 
-        let channel = if self.timed_rx {
+        let channel = if window {
             self.window_channel
         } else {
             self.radio.channel()
         };
+
+        // OpenThread never commands `Sleep` after a receive window: the radio
+        // sleeps once it is over. The driver, receiving when idle, would keep
+        // receiving after the window's frame - for a CSL child until the next
+        // window, a whole period later; and that frame can end a window that
+        // already timed out while it was being received. So the receiver goes
+        // off with the window's frame handed over (which only happens once its
+        // ACK is out); OpenThread commands `Receive` when it expects more.
+        if window {
+            self.radio.sleep_if_idle();
+        }
 
         Ok(meta.as_openthread(channel))
     }
