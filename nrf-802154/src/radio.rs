@@ -1408,7 +1408,16 @@ impl<'d> Radio<'d> {
                     // link load is worth splitting apart at `on_bad_ack` in the
                     // C driver, which is the only place the two are still
                     // distinguishable.
-                    TxError::NoAck | TxError::BusyChannel | TxError::InvalidAck => {
+                    //
+                    // `Aborted` is what a CSL child sees when one of its
+                    // receive windows opens while a frame is still going
+                    // out: the driver gives the window the radio (it
+                    // terminates whatever is ongoing), and OpenThread
+                    // retransmits the frame.
+                    TxError::NoAck
+                    | TxError::BusyChannel
+                    | TxError::InvalidAck
+                    | TxError::Aborted => {
                         trace!("nrf_802154 TX failed: {:?}", err);
                     }
                     _ => warn!("nrf_802154 TX failed: {:?}", err),
