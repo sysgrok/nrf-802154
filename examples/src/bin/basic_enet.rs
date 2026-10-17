@@ -29,7 +29,7 @@ use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
 use nrf_mpsl::MultiprotocolServiceLayer;
 
 use openthread::enet::{self, EnetDriver, EnetRunner};
-use openthread::{BytesFmt, OpenThread, OtResources, SimpleRamSettings};
+use openthread::{BytesFmt, OpenThread, OtResources, Radio as _, SimpleRamSettings};
 
 use rand_core::RngCore;
 
@@ -112,20 +112,21 @@ async fn main(spawner: Spawner) {
 
     let ot_settings = mk_static!(SimpleRamSettings, SimpleRamSettings::new(ot_settings_buf));
 
-    let ot = OpenThread::new(ieee_eui64, rng, ot_settings, ot_resources).unwrap();
-
-    let (_enet_controller, enet_driver_runner, enet_driver) =
-        enet::new(ot.clone(), enet_driver_state);
-
-    info!("About to spawn OT runner");
-
     let radio = Radio::new(
         p.RADIO,
         nrf_802154_examples::radio_peripherals!(p),
         Irqs,
         mpsl,
     );
-    let radio = OpenThreadRadio::new(radio);
+    let mut radio = OpenThreadRadio::new(radio);
+    let radio_caps = radio.init().await.unwrap();
+
+    let ot = OpenThread::new(ieee_eui64, &radio_caps, rng, ot_settings, ot_resources).unwrap();
+
+    let (_enet_controller, enet_driver_runner, enet_driver) =
+        enet::new(ot.clone(), enet_driver_state);
+
+    info!("About to spawn OT runner");
 
     spawner.spawn(run_enet_driver(enet_driver_runner, radio).unwrap());
 

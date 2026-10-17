@@ -24,7 +24,9 @@ use nrf_802154_examples::{Irqs, Rng};
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
 use nrf_mpsl::MultiprotocolServiceLayer;
 
-use openthread::{BytesFmt, OpenThread, OtResources, OtUdpResources, SimpleRamSettings, UdpSocket};
+use openthread::{
+    BytesFmt, OpenThread, OtResources, OtUdpResources, Radio as _, SimpleRamSettings, UdpSocket,
+};
 
 use rand_core::RngCore;
 
@@ -105,18 +107,26 @@ async fn main(spawner: Spawner) {
 
     let ot_settings = mk_static!(SimpleRamSettings, SimpleRamSettings::new(ot_settings_buf));
 
-    let ot = OpenThread::new_with_udp(ieee_eui64, rng, ot_settings, ot_resources, ot_udp_resources)
-        .unwrap();
-
-    info!("About to spawn OT runner");
-
     let radio = Radio::new(
         p.RADIO,
         nrf_802154_examples::radio_peripherals!(p),
         Irqs,
         mpsl,
     );
-    let radio = OpenThreadRadio::new(radio);
+    let mut radio = OpenThreadRadio::new(radio);
+    let radio_caps = radio.init().await.unwrap();
+
+    let ot = OpenThread::new_with_udp(
+        ieee_eui64,
+        &radio_caps,
+        rng,
+        ot_settings,
+        ot_resources,
+        ot_udp_resources,
+    )
+    .unwrap();
+
+    info!("About to spawn OT runner");
 
     spawner.spawn(run_ot(ot.clone(), radio).unwrap());
 

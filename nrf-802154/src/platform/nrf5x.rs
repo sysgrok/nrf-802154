@@ -4,7 +4,7 @@
 //! (the SL's high-precision time base), and both keep the radio and those timers
 //! in one peripheral domain, so nothing has to be bridged.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use embassy_nrf::pac;
 
@@ -97,10 +97,23 @@ extern "C" fn nrf_802154_hp_timer_init() {
     timer.prescaler().write(|w| w.set_prescaler(4));
 }
 
+/// Stop the HP timer.
+///
+/// On the nRF52, a timer that has run and is stopped with `STOP` alone keeps drawing current -
+/// some 13 uA, for as long as it stays stopped (anomaly 78) - so it is shut down instead, as
+/// Nordic's driver does with its own timer. `start` clears it either way.
+fn hp_timer_halt(timer: pac::timer::Timer) {
+    #[cfg(feature = "nrf52")]
+    timer.tasks_shutdown().write_value(1);
+
+    #[cfg(feature = "nrf53")]
+    timer.tasks_stop().write_value(1);
+}
+
 #[no_mangle]
 extern "C" fn nrf_802154_hp_timer_deinit() {
     let timer = hp_timer();
-    timer.tasks_stop().write_value(1);
+    hp_timer_halt(timer);
     timer.intenclr().write(|w| {
         for i in 0..6 {
             w.set_compare(i, true);
@@ -117,8 +130,7 @@ extern "C" fn nrf_802154_hp_timer_start() {
 
 #[no_mangle]
 extern "C" fn nrf_802154_hp_timer_stop() {
-    let timer = hp_timer();
-    timer.tasks_stop().write_value(1);
+    hp_timer_halt(hp_timer());
 }
 
 #[no_mangle]
@@ -135,30 +147,36 @@ extern "C" fn nrf_802154_hp_timer_sync_task_get() -> u32 {
     timer.tasks_capture(1).as_ptr() as u32
 }
 
-/// Whether a sync capture has occurred on CC[1]
-static HP_SYNC_CAPTURED: AtomicBool = AtomicBool::new(false);
+/// The value `sync_prepare` left in CC[1]: one the timer has just passed, so
+/// a capture - which the SL triggers in hardware, from the LP timer's sync
+/// event - can only ever overwrite it with something else.
+static HP_UNEXPECTED_SYNC: AtomicU32 = AtomicU32::new(0);
 
 #[no_mangle]
 extern "C" fn nrf_802154_hp_timer_sync_prepare() {
-    // Mark that no sync capture has occurred yet
-    HP_SYNC_CAPTURED.store(false, Ordering::Release);
+    let past = nrf_802154_hp_timer_current_time_get().wrapping_sub(1);
+
+    HP_UNEXPECTED_SYNC.store(past, Ordering::Release);
+    hp_timer().cc(1).write_value(past);
 }
 
 #[no_mangle]
 extern "C" fn nrf_802154_hp_timer_sync_time_get(p_timestamp: *mut u32) -> bool {
-    if p_timestamp.is_null() {
+    // Whether the capture happened is read off the capture register itself,
+    // as Nordic's own HP timer does: the LP timer's interrupt for the same
+    // event may well not have run yet (or be held off by its critical
+    // section), and a missed sync leaves the timestamps the timer coordinator
+    // derives from this timer drifting against the LP timer.
+    let captured = hp_timer().cc(1).read();
+
+    if p_timestamp.is_null() || captured == HP_UNEXPECTED_SYNC.load(Ordering::Acquire) {
         return false;
     }
-    if HP_SYNC_CAPTURED.load(Ordering::Acquire) {
-        let timer = hp_timer();
-        let val = timer.cc(1).read();
-        // Safety: null check above guarantees p_timestamp is non-null.
-        // The C driver guarantees it points to a valid uint32_t.
-        unsafe { p_timestamp.write(val) };
-        true
-    } else {
-        false
-    }
+
+    // Safety: checked non-null above; the C driver passes a valid `uint32_t`.
+    unsafe { p_timestamp.write(captured) };
+
+    true
 }
 
 #[no_mangle]
@@ -293,6 +311,33 @@ fn lp_current_lpticks() -> u64 {
     }
 }
 
+/// Arm RTC compare channel `cc` to fire at `fire_lpticks`, or as soon as it
+/// reliably can if that is (nearly) past, and return the lptick it is armed
+/// for.
+///
+/// The RTC does not reliably match a CC written with the COUNTER's current or
+/// next value, so the target is kept at least two ticks out - checked again
+/// after the write too, as the COUNTER may tick in between. A compare that
+/// silently never fires leaves whatever the SL timed by it waiting for good.
+fn rtc_compare_arm(cc: usize, fire_lpticks: u64) -> u64 {
+    let rtc = lp_timer();
+
+    // Cleared before writing CC: a match right after the write must not be
+    // erased.
+    rtc.events_compare(cc).write_value(0);
+
+    loop {
+        let target = fire_lpticks.max(lp_current_lpticks() + 2);
+
+        rtc.cc(cc)
+            .write(|w| w.set_compare((target & RTC_COUNTER_MAX as u64) as u32));
+
+        if lp_current_lpticks() + 1 < target {
+            break target;
+        }
+    }
+}
+
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lp_timer_init() {
     let rtc = lp_timer();
@@ -348,57 +393,84 @@ extern "C" fn nrf_802154_platform_sl_lptimer_current_lpticks_get() -> u64 {
 
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_us_to_lpticks_convert(us: u64, round_up: bool) -> u64 {
-    // lpticks = us * 32768 / 1000000
-    // Use u128 intermediate to avoid overflow for large us values.
-    let product = (us as u128) * (RTC_FREQ_HZ as u128);
-    let ticks = if round_up {
-        product.div_ceil(1_000_000u128)
-    } else {
-        product / 1_000_000u128
-    };
-    if ticks > u64::MAX as u128 {
-        u64::MAX
-    } else {
-        ticks as u64
-    }
+    us_to_lpticks(us, round_up)
 }
 
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_lpticks_to_us_convert(lpticks: u64) -> u64 {
-    // us = lpticks * 1000000 / 32768
-    // Use u128 intermediate to avoid overflow for large lptick values.
-    let product = (lpticks as u128) * 1_000_000u128;
-    let us = product / (RTC_FREQ_HZ as u128);
-    if us > u64::MAX as u128 {
-        u64::MAX
+    lpticks_to_us(lpticks)
+}
+
+// 32768 / 1_000_000 reduces to 512 / 15625. The two conversions below are exact for the whole
+// `u64` range without 128-bit arithmetic, which the driver calls far too often to afford: on a
+// 32-bit core a `u128` division is a long software routine.
+
+/// `us * 32768 / 1_000_000`, rounded down or up.
+const fn us_to_lpticks(us: u64, round_up: bool) -> u64 {
+    // us = q * 15625 + r  =>  us * 512 / 15625 = q * 512 + r * 512 / 15625, where
+    // `q * 512` cannot overflow and `r * 512` fits 32 bits
+    let (q, r) = div_rem_u64_by_u16(us, US_PER_LPTICK_DEN);
+
+    let r_scaled = r * LPTICKS_PER_US_NUM;
+    let frac = if round_up {
+        r_scaled.div_ceil(US_PER_LPTICK_DEN)
     } else {
-        us as u64
+        r_scaled / US_PER_LPTICK_DEN
+    };
+
+    q * LPTICKS_PER_US_NUM as u64 + frac as u64
+}
+
+/// `lpticks * 1_000_000 / 32768`, rounded down.
+const fn lpticks_to_us(lpticks: u64) -> u64 {
+    // lpticks = h * 512 + l  =>  lpticks * 15625 / 512 = h * 15625 + l * 15625 / 512
+    let h = lpticks / LPTICKS_PER_US_NUM as u64;
+    let l = lpticks % LPTICKS_PER_US_NUM as u64;
+
+    h * US_PER_LPTICK_DEN as u64 + l * US_PER_LPTICK_DEN as u64 / LPTICKS_PER_US_NUM as u64
+}
+
+/// `RTC_FREQ_HZ / gcd(RTC_FREQ_HZ, 1_000_000)`
+const LPTICKS_PER_US_NUM: u32 = 512;
+/// `1_000_000 / gcd(RTC_FREQ_HZ, 1_000_000)`
+const US_PER_LPTICK_DEN: u32 = 15625;
+
+const _: () =
+    core::assert!(RTC_FREQ_HZ * US_PER_LPTICK_DEN as u64 == 1_000_000 * LPTICKS_PER_US_NUM as u64);
+
+/// Divide a `u64` by a divisor below 2^16 using only 32-bit divisions (a single instruction
+/// on Cortex-M), one 16-bit digit of the dividend at a time.
+const fn div_rem_u64_by_u16(n: u64, d: u32) -> (u64, u32) {
+    let mut q = 0u64;
+    let mut rem = 0u32;
+    let mut shift = 48;
+
+    loop {
+        // `rem < d < 2^16`, so this fits 32 bits
+        let cur = (rem << 16) | ((n >> shift) as u32 & 0xffff);
+
+        q = (q << 16) | (cur / d) as u64;
+        rem = cur % d;
+
+        if shift == 0 {
+            break (q, rem);
+        }
+
+        shift -= 16;
     }
 }
 
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_schedule_at(fire_lpticks: u64) {
     critical_section::with(|cs| LP_FIRE_LPTICKS.borrow(cs).set(fire_lpticks));
-    let rtc = lp_timer();
 
     // Per the C header contract: "If fire_lpticks are in the past, the lptimer
     // event will be triggered asap, but still from the context of an lptimer's ISR."
     // The ISR dispatches only when EVENTS_COMPARE[0] is set by hardware, so a plain
-    // NVIC pend wouldn't work. Instead, program CC[0] to an imminent value so the
-    // hardware compare fires within ~2 ticks, setting the event flag and triggering
-    // the ISR which then checks `now >= fire`.
-    let cc_val = if fire_lpticks <= lp_current_lpticks() {
-        let now_cc = rtc.counter().read().counter();
-        now_cc.wrapping_add(2) & RTC_COUNTER_MAX
-    } else {
-        (fire_lpticks & RTC_COUNTER_MAX as u64) as u32
-    };
-    // Clear the event before writing CC[0] to avoid losing an immediate match:
-    // if the counter hits the new CC value right after writing, clearing after
-    // would erase the just-set event.
-    rtc.events_compare(0).write_value(0);
-    rtc.cc(0).write(|w| w.set_compare(cc_val));
-    rtc.intenset().write(|w| w.set_compare(0, true));
+    // NVIC pend wouldn't work: the compare is armed for the nearest tick it
+    // reliably fires on, and the ISR then checks `now >= fire`.
+    rtc_compare_arm(0, fire_lpticks);
+    lp_timer().intenset().write(|w| w.set_compare(0, true));
 }
 
 #[no_mangle]
@@ -409,10 +481,59 @@ extern "C" fn nrf_802154_platform_sl_lptimer_disable() {
     rtc.events_compare(0).write_value(0);
 }
 
+/// NRF_802154_SL_HW_TASK_PPI_INVALID
+const HW_TASK_PPI_INVALID: u32 = u32::MAX;
+
+/// When the armed hw task fires, in lpticks (see `hw_task_update_ppi`).
+static HW_TASK_FIRE_LPTICKS: critical_section::Mutex<core::cell::Cell<u64>> =
+    critical_section::Mutex::new(core::cell::Cell::new(u64::MAX));
+
+/// The (D)PPI channel the hw task's compare event is connected to, or
+/// `HW_TASK_PPI_INVALID`.
+static HW_TASK_PPI: AtomicU32 = AtomicU32::new(HW_TASK_PPI_INVALID);
+
+/// Connect the hw-task compare event (`EVENTS_COMPARE[2]`) to `ppi_channel` -
+/// the channel whose task end the driver has pointed at the radio's ramp-up -
+/// or disconnect it (`None`).
+fn hw_task_connect(ppi_channel: Option<u32>) {
+    #[cfg(feature = "nrf52")]
+    {
+        let event = lp_timer().events_compare(2).as_ptr() as u32;
+
+        match ppi_channel {
+            Some(ch) => pac::PPI.ch(ch as usize).eep().write_value(event),
+            None => {
+                let ch = HW_TASK_PPI.load(Ordering::Acquire);
+                if ch != HW_TASK_PPI_INVALID {
+                    pac::PPI.ch(ch as usize).eep().write_value(0);
+                }
+            }
+        }
+    }
+    #[cfg(feature = "nrf53")]
+    lp_timer().publish_compare(2).write(|w| {
+        if let Some(ch) = ppi_channel {
+            w.set_chidx(ch as u8);
+            w.set_en(true);
+        }
+    });
+
+    HW_TASK_PPI.store(
+        ppi_channel.unwrap_or(HW_TASK_PPI_INVALID),
+        Ordering::Release,
+    );
+}
+
+/// Whether the hw task's compare has fired (or is too close to fire reliably:
+/// an RTC compare set to the counter's next value may never match).
+fn hw_task_too_late(fire_lpticks: u64) -> bool {
+    lp_timer().events_compare(2).read() != 0 || lp_current_lpticks() + 1 >= fire_lpticks
+}
+
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_hw_task_prepare(
     fire_lpticks: u64,
-    _ppi_channel: u32,
+    ppi_channel: u32,
 ) -> u32 {
     let rtc = lp_timer();
     let cc_val = (fire_lpticks & RTC_COUNTER_MAX as u64) as u32;
@@ -421,16 +542,18 @@ extern "C" fn nrf_802154_platform_sl_lptimer_hw_task_prepare(
     rtc.evtenclr().write(|w| w.set_compare(2, true));
     rtc.events_compare(2).write_value(0);
     rtc.cc(2).write(|w| w.set_compare(cc_val));
-    rtc.evtenset().write(|w| w.set_compare(2, true));
-    LP_HW_TASK_ACTIVE.store(1, Ordering::Release);
+    critical_section::with(|cs| HW_TASK_FIRE_LPTICKS.borrow(cs).set(fire_lpticks));
 
-    // Check if already too late
-    let now = lp_current_lpticks();
-    if now >= fire_lpticks {
-        LP_HW_TASK_ACTIVE.store(0, Ordering::Release);
-        rtc.evtenclr().write(|w| w.set_compare(2, true));
+    if hw_task_too_late(fire_lpticks) {
         return LPTIMER_TOO_LATE;
     }
+
+    // The SL may not know the channel yet (`HW_TASK_PPI_INVALID`): it arms the
+    // timer early and hands the channel over with `hw_task_update_ppi` once
+    // the radio is its.
+    hw_task_connect((ppi_channel != HW_TASK_PPI_INVALID).then_some(ppi_channel));
+    rtc.evtenset().write(|w| w.set_compare(2, true));
+    LP_HW_TASK_ACTIVE.store(1, Ordering::Release);
 
     LPTIMER_SUCCESS
 }
@@ -442,45 +565,48 @@ extern "C" fn nrf_802154_platform_sl_lptimer_hw_task_cleanup() -> u32 {
     }
     let rtc = lp_timer();
     rtc.evtenclr().write(|w| w.set_compare(2, true));
+    hw_task_connect(None);
     rtc.events_compare(2).write_value(0);
     LP_HW_TASK_ACTIVE.store(0, Ordering::Release);
     LPTIMER_SUCCESS
 }
 
 #[no_mangle]
-extern "C" fn nrf_802154_platform_sl_lptimer_hw_task_update_ppi(_ppi_channel: u32) -> u32 {
-    if LP_HW_TASK_ACTIVE.load(Ordering::Acquire) == 0 {
+extern "C" fn nrf_802154_platform_sl_lptimer_hw_task_update_ppi(ppi_channel: u32) -> u32 {
+    if LP_HW_TASK_ACTIVE.load(Ordering::Acquire) == 0 || ppi_channel == HW_TASK_PPI_INVALID {
         return LPTIMER_WRONG_STATE;
     }
-    // PPI/DPPI channel retargeting is not supported by this platform.
-    // Return wrong state so the caller doesn't assume the routing was updated.
-    LPTIMER_WRONG_STATE
+
+    hw_task_connect(Some(ppi_channel));
+
+    // Connected, but possibly after the compare already fired.
+    if hw_task_too_late(critical_section::with(|cs| {
+        HW_TASK_FIRE_LPTICKS.borrow(cs).get()
+    })) {
+        return LPTIMER_TOO_LATE;
+    }
+
+    LPTIMER_SUCCESS
 }
 
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_sync_schedule_now() {
+    // The tick the sync fires on is reported back (`sync_lpticks_get`), so it
+    // has to be exactly the one armed.
     let rtc = lp_timer();
-    let now = rtc.counter().read().counter();
-    // Schedule compare[1] to fire at the next tick
-    let cc_val = now.wrapping_add(2) & RTC_COUNTER_MAX;
-    // Clear event before writing CC[1] to avoid losing an immediate match.
-    rtc.events_compare(1).write_value(0);
-    rtc.cc(1).write(|w| w.set_compare(cc_val));
-    rtc.intenset().write(|w| w.set_compare(1, true));
     rtc.evtenset().write(|w| w.set_compare(1, true));
-    critical_section::with(|cs| LP_SYNC_LPTICKS.borrow(cs).set(lp_current_lpticks() + 2));
+    let armed = rtc_compare_arm(1, 0);
+    critical_section::with(|cs| LP_SYNC_LPTICKS.borrow(cs).set(armed));
+    rtc.intenset().write(|w| w.set_compare(1, true));
 }
 
 #[no_mangle]
 extern "C" fn nrf_802154_platform_sl_lptimer_sync_schedule_at(fire_lpticks: u64) {
-    critical_section::with(|cs| LP_SYNC_LPTICKS.borrow(cs).set(fire_lpticks));
     let rtc = lp_timer();
-    let cc_val = (fire_lpticks & RTC_COUNTER_MAX as u64) as u32;
-    // Clear event before writing CC[1] to avoid losing an immediate match.
-    rtc.events_compare(1).write_value(0);
-    rtc.cc(1).write(|w| w.set_compare(cc_val));
-    rtc.intenset().write(|w| w.set_compare(1, true));
     rtc.evtenset().write(|w| w.set_compare(1, true));
+    let armed = rtc_compare_arm(1, fire_lpticks);
+    critical_section::with(|cs| LP_SYNC_LPTICKS.borrow(cs).set(armed));
+    rtc.intenset().write(|w| w.set_compare(1, true));
 }
 
 #[no_mangle]
@@ -540,8 +666,6 @@ pub(crate) fn lp_timer_isr() {
     // Handle compare[1]: sync timer fire
     if rtc.events_compare(1).read() != 0 {
         rtc.events_compare(1).write_value(0);
-        // Mark sync capture in HP timer
-        HP_SYNC_CAPTURED.store(true, Ordering::Release);
         unsafe { nrf_802154_sl_timestamper_synchronized() };
     }
 }
