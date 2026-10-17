@@ -86,7 +86,7 @@ pub struct OpenThreadRadio<'d> {
     /// is still the driver's default.
     csma_max_backoffs: Option<u8>,
     /// Whether the receiver is currently commanded by a timed window
-    /// (`receive_at`) rather than by `set_receive` / `set_sleep`.
+    /// (`set_receive_at`) rather than by `set_receive` / `set_sleep`.
     timed_rx: bool,
     /// The channel of the last timed window, which frames received in it
     /// arrived on.
@@ -197,7 +197,7 @@ impl openthread::Radio for OpenThreadRadio<'_> {
                 // The transmit power arrives per-transmit and is applied
                 // before each frame (see `transmit`).
                 .union(openthread::Capabilities::TRANSMIT_FRAME_POWER)
-                // Timed receive (`receive_at`), a microsecond radio clock, frame
+                // Timed receive (`set_receive_at`), a microsecond radio clock, frame
                 // timestamps and enhanced-ACK security with the CSL IE: the
                 // driver has it all, so this node can be a CSL (Synchronized)
                 // Sleepy End Device.
@@ -232,8 +232,19 @@ impl openthread::Radio for OpenThreadRadio<'_> {
 
     async fn set_config(&mut self, config: &openthread::Config) -> Result<(), Self::Error> {
         if self.config != *config {
+            let to_auto_sleep = config.auto_sleep && !self.config.auto_sleep;
+
             self.config = config.clone();
             Self::apply_config(&mut self.radio, &self.config);
+
+            // The driver only takes the new idle behavior after the operation in
+            // progress: a receiver on because the node used to receive when idle
+            // would stay on until the next one. So the switch to sleeping when
+            // idle puts it to sleep right away (unless it is busy, or a receive
+            // window is pending - those end in sleep by themselves now).
+            if to_auto_sleep {
+                self.radio.sleep_if_idle();
+            }
         }
 
         Ok(())
@@ -283,29 +294,7 @@ impl openthread::Radio for OpenThreadRadio<'_> {
         Ok(())
     }
 
-    async fn set_sleep(&mut self) -> Result<(), Self::Error> {
-        if core::mem::take(&mut self.timed_rx) || self.radio.has_pending_window() {
-            // A timed window is pending or just ran: the driver sleeps by
-            // itself between and after windows, and a frame may be arriving
-            // right now - do not abort it. `sleep_if_idle` refusing (busy) is
-            // then fine. OpenThread asks for sleep freely (after every
-            // operation), so this is the common case for a CSL child.
-            self.radio.sleep_if_idle();
-
-            return Ok(());
-        }
-
-        // The receiver goes off, so frames sent to a sleeping node are
-        // genuinely missed, as the radio contract requires; frames already
-        // in the RX queue were received while awake and remain deliverable.
-        if !self.radio.sleep() {
-            return Err(Error::EnterSleep);
-        }
-
-        Ok(())
-    }
-
-    async fn receive_at(
+    async fn set_receive_at(
         &mut self,
         channel: u8,
         start_us: u64,
@@ -345,6 +334,28 @@ impl openthread::Radio for OpenThreadRadio<'_> {
         // Until the next `set_sleep` / `set_receive`, `receive` only drains the
         // RX queue: the receiver is the window's to switch on and off.
         self.timed_rx = true;
+
+        Ok(())
+    }
+
+    async fn set_sleep(&mut self) -> Result<(), Self::Error> {
+        if core::mem::take(&mut self.timed_rx) || self.radio.has_pending_window() {
+            // A timed window is pending or just ran: the driver sleeps by
+            // itself between and after windows, and a frame may be arriving
+            // right now - do not abort it. `sleep_if_idle` refusing (busy) is
+            // then fine. OpenThread asks for sleep freely (after every
+            // operation), so this is the common case for a CSL child.
+            self.radio.sleep_if_idle();
+
+            return Ok(());
+        }
+
+        // The receiver goes off, so frames sent to a sleeping node are
+        // genuinely missed, as the radio contract requires; frames already
+        // in the RX queue were received while awake and remain deliverable.
+        if !self.radio.sleep() {
+            return Err(Error::EnterSleep);
+        }
 
         Ok(())
     }
@@ -586,7 +597,7 @@ impl openthread::Radio for OpenThreadRadio<'_> {
 
         let len = psdu_buf.len();
         let meta = if self.timed_rx {
-            // Inside a timed window (`receive_at`): just wait for the window's
+            // Inside a timed window (`set_receive_at`): just wait for the window's
             // frames, the receiver is the driver's to run - and to put to sleep
             // when the window ends.
             Radio::wait_window_frame(&mut self.radio, &mut psdu_buf[..len - 2]).await
