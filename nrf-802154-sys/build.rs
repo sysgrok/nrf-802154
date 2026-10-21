@@ -6,6 +6,20 @@
 use std::env;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
+use std::process::Command;
+
+/// Path of `llvm-ar` from the `llvm-tools` rustup component.
+fn llvm_ar() -> PathBuf {
+    let output = Command::new(env::var("RUSTC").unwrap())
+        .args(["--print", "sysroot"])
+        .output()
+        .expect("Unable to query the rustc sysroot");
+    let sysroot = String::from_utf8(output.stdout).unwrap();
+    PathBuf::from(sysroot.trim()).join(format!(
+        "lib/rustlib/{}/bin/llvm-ar",
+        env::var("HOST").unwrap()
+    ))
+}
 
 enum Series {
     Nrf52,
@@ -303,7 +317,19 @@ fn build(target: &Target) {
     // upstream tree — which declares no `cmake_minimum_required()`/`project()`
     // of its own, being meant for inclusion in a Zephyr build — as a
     // subdirectory. See the comments there.
-    cmake::Config::new("cmake")
+    let mut config = cmake::Config::new("cmake");
+    // CMake defaults to the host `ar`, and Apple's silently produces empty
+    // archives from ELF objects. `llvm-ar s` also replaces the host `ranlib`.
+    let llvm_ar = llvm_ar();
+    if llvm_ar.is_file() {
+        config
+            .define("CMAKE_AR", &llvm_ar)
+            .define("CMAKE_C_ARCHIVE_FINISH", "<CMAKE_AR> s <TARGET>")
+            .define("CMAKE_CXX_ARCHIVE_FINISH", "<CMAKE_AR> s <TARGET>");
+    } else if env::var("HOST").unwrap().contains("apple") {
+        println!("cargo:warning=llvm-ar not found, run `rustup component add llvm-tools`");
+    }
+    config
         .define("CMAKE_BUILD_TYPE", "MinSizeRel")
         .define(
             "CMAKE_C_FLAGS",
