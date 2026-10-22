@@ -42,8 +42,8 @@ use nrf_mpsl::MultiprotocolServiceLayer;
 use nrf_sdc::{self as sdc, Mem as SdcMem, Peripherals as SdcPeripherals};
 
 use openthread::{
-    BytesFmt, OpenThread, OtResources, OtSrpResources, OtUdpResources, SimpleRamSettings, SrpConf,
-    UdpSocket,
+    BytesFmt, OpenThread, OtResources, OtSrpResources, OtUdpResources, Radio as _,
+    SimpleRamSettings, SrpConf, UdpSocket,
 };
 
 use rand_core::RngCore;
@@ -157,7 +157,8 @@ async fn main(spawner: Spawner) {
         Irqs,
         mpsl,
     );
-    let radio = OpenThreadRadio::new(radio);
+    let mut radio = OpenThreadRadio::new(radio);
+    let radio_caps = radio.init().await.unwrap();
 
     // --- OpenThread ---
     let ot_resources = mk_static!(OtResources, OtResources::new());
@@ -170,6 +171,7 @@ async fn main(spawner: Spawner) {
 
     let ot = OpenThread::new_with_udp_srp(
         ieee_eui64,
+        &radio_caps,
         rng,
         ot_settings,
         ot_resources,

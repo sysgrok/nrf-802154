@@ -54,6 +54,6 @@ heapless = { version = "0.9", default-features = false }
 rand_core = { version = "0.9", default-features = false }
 portable-atomic = { version = "1", default-features = false }
 
-#[patch.crates-io]
-#openthread = { git = "https://github.com/esp-rs/openthread" }
-#openthread-sys = { git = "https://github.com/esp-rs/openthread" }
+[patch.crates-io]
+openthread = { git = "https://github.com/esp-rs/openthread" }
+openthread-sys = { git = "https://github.com/esp-rs/openthread" }
