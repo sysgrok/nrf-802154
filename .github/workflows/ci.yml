@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Nightly, to catch drift in what the build does not pin: the runner image,
+  # the dependencies (`Cargo.lock` is not committed) and the git dependencies.
+  schedule:
+    - cron: "50 6 * * *"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -112,6 +117,12 @@ jobs:
         run: rustup component add clippy
       - name: Install targets
         run: rustup target add thumbv7em-none-eabi thumbv7em-none-eabihf thumbv8m.main-none-eabi thumbv8m.main-none-eabihf
+      # bindgen loads the newest libclang on the runner, but takes the builtin
+      # headers from the default `clang`. When the two versions differ (Ubuntu
+      # 26.04: 22 vs 21), `<stdint.h>` comes out empty. Use the libclang of the
+      # default `clang`.
+      - name: Match libclang to the default clang
+        run: echo "LIBCLANG_PATH=$(dirname "$(readlink -f "$(command -v clang)")")/../lib" >> "$GITHUB_ENV"
       - name: cargo ${{ matrix.cmd }}
         run: cargo ${{ matrix.cmd }}
 
@@ -124,6 +135,9 @@ jobs:
           submodules: recursive
       - name: Install targets
         run: rustup target add thumbv7em-none-eabi
+      # See the `check` job.
+      - name: Match libclang to the default clang
+        run: echo "LIBCLANG_PATH=$(dirname "$(readlink -f "$(command -v clang)")")/../lib" >> "$GITHUB_ENV"
       # Release builds (workspace profile: opt-level=z, fat LTO) feeding the
       # flash/RAM size reports below.
       - name: Build examples and the HIL test node (release, for size reporting)

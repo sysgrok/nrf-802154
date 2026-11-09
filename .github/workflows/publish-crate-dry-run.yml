@@ -26,6 +26,10 @@ jobs:
           # nrfx, nrfxlib); they must be checked out so the `include`d files exist
           # to be packaged.
           submodules: recursive
+      # bindgen in the `-sys` build: match libclang to the default `clang`
+      # (see `ci.yml`).
+      - name: Setup | libclang
+        run: echo "LIBCLANG_PATH=$(dirname "$(readlink -f "$(command -v clang)")")/../lib" >> "$GITHUB_ENV"
       - name: Setup | Rust
         uses: dtolnay/rust-toolchain@master
         with:
