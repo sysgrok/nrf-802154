@@ -140,13 +140,9 @@ pub use {nrf_802154_sys as raw, nrf_mpsl as mpsl};
 // This mod MUST go first, so that the others see its macros.
 pub(crate) mod fmt;
 
-#[cfg(feature = "openthread")]
-mod openthread;
 mod platform;
 mod radio;
 
-#[cfg(feature = "openthread")]
-pub use openthread::OpenThreadRadio;
 #[cfg(feature = "_nrf54l")]
 pub use platform::CcmInterruptHandler;
 pub use platform::{EguInterruptHandler, LpTimerInterruptHandler};

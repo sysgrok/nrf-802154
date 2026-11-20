@@ -10,16 +10,10 @@ use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_time::Timer;
 
-use embedded_alloc::LlffHeap as Heap;
-
 use {defmt_rtt as _, panic_probe as _};
 
 // The critical-section implementation the examples use.
 use nrf_mpsl as _;
-
-// Only needed for tinyrlibc's alloc functions which won't be called at runtime.
-#[global_allocator]
-static HEAP: Heap = Heap::empty();
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {

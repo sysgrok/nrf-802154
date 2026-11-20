@@ -24,8 +24,6 @@ use defmt::{assert, info, panic};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 
-use embedded_alloc::LlffHeap as Heap;
-
 use nrf_802154::{Error, Radio, TxError};
 use nrf_802154_examples::{build_data_frame, Irqs};
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
@@ -57,9 +55,6 @@ static MPSL: StaticCell<MultiprotocolServiceLayer<'static>> = StaticCell::new();
 async fn mpsl_task(mpsl: &'static MultiprotocolServiceLayer<'static>) -> ! {
     mpsl.run().await
 }
-
-#[global_allocator]
-static HEAP: Heap = Heap::empty();
 
 /// A data frame with a link-security header (ENC-MIC-32, key id mode 1) over
 /// `payload_len` bytes of dummy ciphertext plus a dummy MIC.
