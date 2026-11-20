@@ -127,34 +127,6 @@ macro_rules! mpsl_peripherals {
     };
 }
 
-/// The blocking hardware RNG. nRF54L has no standalone `RNG` peripheral; its
-/// entropy comes out of the CRACEN crypto engine instead.
-#[cfg(feature = "nrf52840")]
-pub type Rng<'d> = embassy_nrf::rng::Rng<'d, embassy_nrf::mode::Blocking>;
-
-/// The blocking hardware RNG. nRF54L has no standalone `RNG` peripheral; its
-/// entropy comes out of the CRACEN crypto engine instead.
-#[cfg(feature = "_nrf54l")]
-pub type Rng<'d> = embassy_nrf::cracen::Cracen<'d, embassy_nrf::mode::Blocking>;
-
-/// Claim the hardware RNG out of `embassy_nrf::init`'s `Peripherals`.
-#[cfg(feature = "nrf52840")]
-#[macro_export]
-macro_rules! rng {
-    ($p:expr) => {
-        embassy_nrf::rng::Rng::new_blocking($p.RNG)
-    };
-}
-
-/// Claim the hardware RNG out of `embassy_nrf::init`'s `Peripherals`.
-#[cfg(feature = "_nrf54l")]
-#[macro_export]
-macro_rules! rng {
-    ($p:expr) => {
-        embassy_nrf::cracen::Cracen::new_blocking($p.CRACEN)
-    };
-}
-
 /// Claim the peripherals the 802.15.4 driver needs out of `embassy_nrf::init`'s
 /// `Peripherals`.
 #[cfg(feature = "nrf52840")]
