@@ -12,7 +12,6 @@ default = ["nrf52840"]
 nrf52840 = [
     "nrf-802154/nrf52840",
     "nrf-mpsl/nrf52840",
-    "nrf-sdc/nrf52840",
     "embassy-nrf/nrf52840",
     "embassy-nrf/time-driver-rtc1",
 ]
@@ -20,7 +19,6 @@ nrf54l15 = [
     "_nrf54l",
     "nrf-802154/nrf54l15-app-s",
     "nrf-mpsl/nrf54l15-app-s",
-    "nrf-sdc/nrf54l15-app-s",
     "embassy-nrf/nrf54l15-app-s",
     "embassy-nrf/time-driver-grtc",
 ]
@@ -28,7 +26,6 @@ nrf54lm20 = [
     "_nrf54l",
     "nrf-802154/nrf54lm20-app-s",
     "nrf-mpsl/nrf54lm20-app-s",
-    "nrf-sdc/nrf54lm20-app-s",
     "embassy-nrf/nrf54lm20-app-s",
     "embassy-nrf/time-driver-grtc",
 ]
@@ -86,49 +83,14 @@ name = "sleep_baseline"
 path = "src/bin/sleep_baseline.rs"
 required-features = ["nrf52840"]
 
-[[bin]]
-name = "basic_udp"
-path = "src/bin/basic_udp.rs"
-harness = false
-
-[[bin]]
-name = "basic_enet"
-path = "src/bin/basic_enet.rs"
-harness = false
-
-[[bin]]
-name = "srp"
-path = "src/bin/srp.rs"
-harness = false
-
-# The BLE coexistence example is nRF52840-only for now: it pins a prebuilt
-# SoftDevice Controller variant and a `trouble-host` configuration that have
-# only been checked out on that part.
-[[bin]]
-name = "srp_ble_coex"
-path = "src/bin/srp_ble_coex.rs"
-harness = false
-required-features = ["nrf52840"]
-
 [dependencies]
-nrf-802154 = { workspace = true, default-features = false, features = ["defmt", "openthread"] }
+nrf-802154 = { workspace = true, default-features = false, features = ["defmt"] }
 nrf-mpsl = { workspace = true, default-features = false, features = ["critical-section-impl"] }
-nrf-sdc = { workspace = true, default-features = false, features = ["peripheral", "central", "defmt"] }
-trouble-host = { workspace = true, default-features = false, features = ["defmt", "gatt", "peripheral", "default-packet-pool"] }
-bt-hci = { workspace = true, default-features = false, features = ["defmt"] }
-
-# `matter` is the feature bundle the crate's prebuilt OpenThread libraries are
-# built with; without it, the examples would build OpenThread from source.
-openthread = { workspace = true, default-features = false, features = ["matter", "udp", "srp", "embassy-net-driver-channel", "defmt"] }
-tinyrlibc = { workspace = true, default-features = false, features = ["alloc", "strstr", "strcmp", "isupper", "utoa", "strtoul"] }
-embedded-alloc = { workspace = true }
 
 embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "defmt"] }
 embassy-nrf = { workspace = true, default-features = false, features = ["unstable-pac", "time"] }
-embassy-sync = { workspace = true, default-features = false, features = ["defmt"] }
 embassy-futures = { workspace = true, default-features = false }
 embassy-time = { workspace = true, default-features = false, features = ["defmt"] }
-embassy-net = { workspace = true, default-features = false, features = ["defmt", "proto-ipv6", "medium-ip", "udp"] }
 
 defmt = { workspace = true, default-features = false }
 defmt-rtt = { workspace = true, default-features = false }
@@ -137,5 +99,3 @@ cortex-m = { workspace = true, default-features = false }
 cortex-m-rt = { workspace = true, default-features = false }
 panic-probe = { workspace = true, default-features = false, features = ["print-defmt"] }
 static_cell = { workspace = true, default-features = false }
-heapless = { workspace = true, default-features = false }
-rand_core = { workspace = true, default-features = false }

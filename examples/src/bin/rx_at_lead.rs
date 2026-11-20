@@ -12,8 +12,6 @@ use defmt::info;
 use embassy_executor::Spawner;
 use embassy_time::Timer;
 
-use embedded_alloc::LlffHeap as Heap;
-
 use nrf_802154::Radio;
 use nrf_802154_examples::Irqs;
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
@@ -35,9 +33,6 @@ static MPSL: StaticCell<MultiprotocolServiceLayer<'static>> = StaticCell::new();
 async fn mpsl_task(mpsl: &'static MultiprotocolServiceLayer<'static>) -> ! {
     mpsl.run().await
 }
-
-#[global_allocator]
-static HEAP: Heap = Heap::empty();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {

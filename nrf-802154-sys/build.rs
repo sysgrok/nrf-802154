@@ -228,6 +228,10 @@ fn bindgen(target: &Target) -> bindgen::Builder {
         .clang_args(target.core.map(|x| format!("-D{}", x)))
         .clang_args(target.chip_core.map(|x| format!("-D{}", x)))
         .prepend_enum_name(false)
+        // Declared by `include/string.h` for the C code. These are runtime
+        // symbols that Rust declares itself, and with `size_t` as `unsigned`
+        // the declarations would not match Rust's.
+        .blocklist_function("mem(set|cpy|move|cmp)")
 }
 
 fn build(target: &Target) {
