@@ -115,6 +115,10 @@ extern "C" {
 /// Measures the temperature through MPSL. Thread context only (blocking).
 fn measure_temperature() -> i8 {
     let raw = unsafe { mpsl::raw::mpsl_temperature_get() };
+    // MPSL waits for the measurement with WFE, which consumes an event that
+    // a task wake may have left for the thread executor's WFE: put it back,
+    // or the executor can sleep with work queued.
+    cortex_m::asm::sev();
     // Clamp to i8 range in case MPSL returns an out-of-range or error value.
     (raw / 4).clamp(i8::MIN as i32, i8::MAX as i32) as i8
 }
