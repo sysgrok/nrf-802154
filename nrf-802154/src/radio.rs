@@ -74,9 +74,11 @@ impl From<raw::nrf_802154_tx_error_t> for TxError {
     }
 }
 
-/// Coexistence RX request mode.
+/// When the radio requests the medium from the Wi-Fi (PTA) coexistence
+/// arbiter while receiving; see [`Radio::set_coex_rx_request_mode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum CoexRxRequestMode {
     /// On energy detection.
     EnergyDetection,
@@ -105,9 +107,11 @@ impl CoexRxRequestMode {
     }
 }
 
-/// Coexistence TX request mode.
+/// When the radio requests the medium from the Wi-Fi (PTA) coexistence
+/// arbiter while transmitting; see [`Radio::set_coex_tx_request_mode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum CoexTxRequestMode {
     /// When the frame is ready.
     FrameReady,
@@ -746,32 +750,53 @@ impl<'d> Radio<'d> {
         }
     }
 
-    /// Set the coexistence RX request mode.
-    pub fn set_coex_rx_request_mode(&mut self, mode: CoexRxRequestMode) -> bool {
-        unsafe { raw::nrf_802154_coex_rx_request_mode_set(mode.to_raw()) }
-    }
-
-    /// Get the coexistence RX request mode.
-    pub fn coex_rx_request_mode(&self) -> Option<CoexRxRequestMode> {
-        CoexRxRequestMode::from_raw(unsafe { raw::nrf_802154_coex_rx_request_mode_get() })
-    }
-
-    /// Set the coexistence TX request mode.
-    pub fn set_coex_tx_request_mode(&mut self, mode: CoexTxRequestMode) -> bool {
-        unsafe { raw::nrf_802154_coex_tx_request_mode_set(mode.to_raw()) }
-    }
-
-    /// Get the coexistence TX request mode.
-    pub fn coex_tx_request_mode(&self) -> Option<CoexTxRequestMode> {
-        CoexTxRequestMode::from_raw(unsafe { raw::nrf_802154_coex_tx_request_mode_get() })
-    }
-
     /// Empty both (short and extended) ACK pending-bit lists.
     pub fn clear_pending(&mut self) {
         unsafe {
             raw::nrf_802154_pending_bit_for_addr_reset(false);
             raw::nrf_802154_pending_bit_for_addr_reset(true);
         }
+    }
+
+    /// Set when the radio requests the medium from the Wi-Fi (PTA)
+    /// coexistence arbiter while receiving. The driver default is
+    /// [`CoexRxRequestMode::Destined`].
+    ///
+    /// This is not the BLE coexistence through MPSL timeslots: it takes
+    /// effect only once an MPSL coex interface is registered
+    /// (`mpsl_cx_interface_set`), which neither this crate nor `nrf-mpsl`
+    /// does.
+    ///
+    /// Returns `false` when the mode is not supported:
+    /// [`CoexRxRequestMode::EnergyDetection`] is rejected on nRF52805,
+    /// nRF52810, nRF52832 and nRF54L.
+    pub fn set_coex_rx_request_mode(&mut self, mode: CoexRxRequestMode) -> bool {
+        unsafe { raw::nrf_802154_coex_rx_request_mode_set(mode.to_raw()) }
+    }
+
+    /// The Wi-Fi (PTA) coexistence RX request mode; see
+    /// [`set_coex_rx_request_mode`](Self::set_coex_rx_request_mode).
+    pub fn coex_rx_request_mode(&self) -> Option<CoexRxRequestMode> {
+        CoexRxRequestMode::from_raw(unsafe { raw::nrf_802154_coex_rx_request_mode_get() })
+    }
+
+    /// Set when the radio requests the medium from the Wi-Fi (PTA)
+    /// coexistence arbiter while transmitting. The driver default is
+    /// [`CoexTxRequestMode::OnCcaToggle`]. A change applies from the next
+    /// transmission.
+    ///
+    /// As with [`set_coex_rx_request_mode`](Self::set_coex_rx_request_mode),
+    /// this takes effect only with an MPSL coex interface registered.
+    ///
+    /// Returns `false` when the mode is not supported.
+    pub fn set_coex_tx_request_mode(&mut self, mode: CoexTxRequestMode) -> bool {
+        unsafe { raw::nrf_802154_coex_tx_request_mode_set(mode.to_raw()) }
+    }
+
+    /// The Wi-Fi (PTA) coexistence TX request mode; see
+    /// [`set_coex_tx_request_mode`](Self::set_coex_tx_request_mode).
+    pub fn coex_tx_request_mode(&self) -> Option<CoexTxRequestMode> {
+        CoexTxRequestMode::from_raw(unsafe { raw::nrf_802154_coex_tx_request_mode_get() })
     }
 
     /// Move the radio from any state to the DISABLED state
