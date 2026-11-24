@@ -53,6 +53,11 @@ git submodule update --init --recursive
 (The crates published to crates.io bundle the required sources, so this step is only needed when building
 from a git checkout — consumers depending on the published crates do not need it.)
 
+On macOS, the build also needs the `llvm-tools` rustup component (`rustup component add llvm-tools`;
+this repository's `rust-toolchain.toml` already installs it), or a non-Apple `clang` such as Homebrew's LLVM
+first on `PATH`. Apple's `ar` silently drops the ELF objects of the C driver, and linking then fails on every
+`nrf_802154_*` symbol.
+
 ## High-level bindings
 
 The `nrf-802154` crate contains high-level easy-to-use Rust async/await bindings for the 802.15.4 Radio Driver.
