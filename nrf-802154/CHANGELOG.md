@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+* Fix (nRF52/nRF54L): a task woken while the radio refreshed its temperature reading could stay asleep until the next interrupt (MPSL's measurement cleared the executor's wake event)
 * `Radio`: Wi-Fi (PTA) coexistence RX/TX request mode controls (`set_coex_rx_request_mode` / `set_coex_tx_request_mode`)
 * Fix (nRF52/nRF53): an LP timer event the driver scheduled could silently never fire - the RTC compare was armed for the counter's next tick, which the RTC does not reliably match - leaving whatever the driver timed by it (a CSMA-CA backoff, say) waiting for good
 * Breaking: CSL (Thread 1.2 Synchronized Sleepy End Device) support in `OpenThreadRadio`
