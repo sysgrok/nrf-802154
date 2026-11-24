@@ -18,8 +18,6 @@ use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
 use embassy_time::Timer;
 
-use embedded_alloc::LlffHeap as Heap;
-
 use nrf_802154::Radio;
 use nrf_802154_examples::{build_data_frame, Irqs};
 use nrf_mpsl::raw::mpsl_clock_lfclk_cfg_t;
@@ -44,10 +42,6 @@ static MPSL: StaticCell<MultiprotocolServiceLayer<'static>> = StaticCell::new();
 async fn mpsl_task(mpsl: &'static MultiprotocolServiceLayer<'static>) -> ! {
     mpsl.run().await
 }
-
-// Only needed for tinyrlibc's alloc functions which won't be called at runtime.
-#[global_allocator]
-static HEAP: Heap = Heap::empty();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {

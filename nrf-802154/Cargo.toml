@@ -17,7 +17,7 @@ default-target = "thumbv7em-none-eabihf"
 targets = ["thumbv7em-none-eabihf"]
 
 [features]
-#default = ["nrf52840", "defmt", "openthread"]
+#default = ["nrf52840", "defmt"]
 nrf52805 = ["nrf-mpsl/nrf52805", "nrf52", "embassy-nrf/nrf52805"]
 nrf52810 = ["nrf-mpsl/nrf52810", "nrf52", "embassy-nrf/nrf52810"]
 nrf52811 = ["nrf-mpsl/nrf52811", "nrf52", "embassy-nrf/nrf52811"]
@@ -51,7 +51,6 @@ log = ["dep:log", "nrf-mpsl/log"]
 [dependencies]
 defmt = { workspace = true, default-features = false, optional = true }
 log = { workspace = true, default-features = false, optional = true }
-openthread = { workspace = true, default-features = false, optional = true }
 nrf-mpsl = { workspace = true, default-features = false }
 nrf-802154-sys = { workspace = true, default-features = false }
 embassy-nrf = { workspace = true, default-features = false, features = ["unstable-pac"] }
