@@ -8,19 +8,6 @@ use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Path of `llvm-ar` from the `llvm-tools` rustup component.
-fn llvm_ar() -> PathBuf {
-    let output = Command::new(env::var("RUSTC").unwrap())
-        .args(["--print", "sysroot"])
-        .output()
-        .expect("Unable to query the rustc sysroot");
-    let sysroot = String::from_utf8(output.stdout).unwrap();
-    PathBuf::from(sysroot.trim()).join(format!(
-        "lib/rustlib/{}/bin/llvm-ar",
-        env::var("HOST").unwrap()
-    ))
-}
-
 enum Series {
     Nrf52,
     Nrf53,
@@ -242,6 +229,20 @@ fn bindgen(target: &Target) -> bindgen::Builder {
         .clang_args(target.core.map(|x| format!("-D{}", x)))
         .clang_args(target.chip_core.map(|x| format!("-D{}", x)))
         .prepend_enum_name(false)
+}
+
+/// Path of `llvm-ar` from the `llvm-tools` rustup component.
+fn llvm_ar() -> PathBuf {
+    let output = Command::new(env::var("RUSTC").unwrap())
+        .args(["--print", "sysroot"])
+        .output()
+        .expect("Unable to query the rustc sysroot");
+    let sysroot = String::from_utf8(output.stdout).unwrap();
+    PathBuf::from(sysroot.trim()).join(format!(
+        "lib/rustlib/{}/bin/llvm-ar{}",
+        env::var("HOST").unwrap(),
+        env::consts::EXE_SUFFIX
+    ))
 }
 
 fn build(target: &Target) {
