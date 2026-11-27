@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-11-27
 * Breaking: remove the `openthread` feature and `OpenThreadRadio`: the OpenThread radio is `NrfRadio` in the new `openthread-driver-nrf` crate of the `openthread` repository
 * Fix (nRF52/nRF54L): a task woken while the radio refreshed its temperature reading could stay asleep until the next interrupt (MPSL's measurement cleared the executor's wake event)
 * `Radio`: Wi-Fi (PTA) coexistence RX/TX request mode controls (`set_coex_rx_request_mode` / `set_coex_tx_request_mode`)

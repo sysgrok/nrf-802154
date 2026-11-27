@@ -1,7 +1,7 @@
 [package]
 name = "nrf-802154-sys"
 authors = ["Ivan Markov <ivan.markov@sysgrok.com>"]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Low level Rust bindings to the NRF 802.15.4 Radio Driver"
 license = "MIT OR Apache-2.0"
